@@ -1,9 +1,51 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { submitReview } from "./api";
+import { extractApplicationPdf, submitReview } from "./api";
 import { StatusBadge } from "./StatusBadge";
-import type { ReviewResult } from "./types";
+import type { ExtractedApplicationFields, ReviewResult } from "./types";
+
+const FILE_INPUT_CLASSES =
+  "block w-full text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-gray-900 " +
+  "file:px-3 file:py-2 file:text-sm file:font-medium file:text-white file:cursor-pointer " +
+  "hover:file:bg-gray-800";
+
+// Every key of ExtractedApplicationFields mapped to the form field it fills.
+// Keeping this as one exhaustive table (rather than hand-written per-field
+// branches) means adding a field to ExtractedApplicationFields is a type
+// error here until it's mapped, instead of silently doing nothing.
+const EXTRACTED_FIELD_MAP: { [K in keyof ExtractedApplicationFields]: keyof typeof EMPTY_FORM } = {
+  beverage_class: "beverageClass",
+  imported: "imported",
+  brand_name: "brandName",
+  fanciful_name: "fancifulName",
+  name_address: "nameAddress",
+  appellation: "appellation",
+};
+const PDF_MAPPED_FIELD_COUNT = Object.keys(EXTRACTED_FIELD_MAP).length;
+
+function applyExtractedFields(extracted: ExtractedApplicationFields): {
+  patch: Partial<typeof EMPTY_FORM>;
+  filledCount: number;
+} {
+  const patch: Partial<typeof EMPTY_FORM> = {};
+  let filledCount = 0;
+  for (const [srcKey, dstKey] of Object.entries(EXTRACTED_FIELD_MAP) as [
+    keyof ExtractedApplicationFields,
+    keyof typeof EMPTY_FORM,
+  ][]) {
+    const value = extracted[srcKey];
+    if (value != null) {
+      (patch as Record<string, unknown>)[dstKey] = value;
+      filledCount += 1;
+    }
+  }
+  return { patch, filledCount };
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 const FIELD_LABELS: Record<string, string> = {
   brand_name: "Brand name",
@@ -47,11 +89,38 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReviewResult | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+  const [pdfNotice, setPdfNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
   const isWine = form.beverageClass === "wine";
 
   function set<K extends keyof typeof EMPTY_FORM>(key: K, value: (typeof EMPTY_FORM)[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  async function onApplicationPdfChange(file: File | null) {
+    if (!file) return;
+    setPdfLoading(true);
+    setPdfNotice(null);
+    try {
+      const extracted = await extractApplicationPdf(file);
+      const { patch, filledCount } = applyExtractedFields(extracted);
+      setForm((prev) => ({ ...prev, ...patch }));
+      setPdfNotice({
+        kind: "success",
+        message:
+          filledCount > 0
+            ? `Filled ${filledCount} of ${PDF_MAPPED_FIELD_COUNT} fields from the PDF. Class/type, alcohol ` +
+              "content, net contents, country of origin, and sulfite declaration aren't captured on the " +
+              "application form itself — enter those from the label."
+            : "Couldn't find any recognized fields in that PDF — it may not be TTB F 5100.31, or none of " +
+              "its fields were filled in. Please enter the application data manually.",
+      });
+    } catch (err) {
+      setPdfNotice({ kind: "error", message: errorMessage(err) });
+    } finally {
+      setPdfLoading(false);
+    }
   }
 
   async function onSubmit(e: FormEvent) {
@@ -81,7 +150,7 @@ export default function Home() {
       });
       setResult(review);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
@@ -95,14 +164,39 @@ export default function Home() {
         checks that what&apos;s on the label matches what was submitted.
       </p>
 
-      <form onSubmit={onSubmit} className="mt-8 space-y-6 rounded-lg border border-gray-200 p-6">
+      <div className="mt-6 rounded-lg border border-dashed border-gray-300 p-4">
+        <label className="block text-sm">
+          <span className="mb-1 block font-medium text-gray-800">
+            Upload TTB F 5100.31 application (optional)
+          </span>
+          <input
+            type="file"
+            accept="application/pdf"
+            disabled={pdfLoading}
+            onChange={(e) => onApplicationPdfChange(e.target.files?.[0] ?? null)}
+            className={FILE_INPUT_CLASSES}
+          />
+        </label>
+        <p className="mt-1 text-xs text-gray-500">
+          Pre-fills the fields below from a filled-in copy of the application PDF. Only works for a PDF
+          that still has its fillable form fields — not a scanned or flattened copy.
+        </p>
+        {pdfLoading && <p className="mt-2 text-sm text-gray-600">Reading PDF…</p>}
+        {pdfNotice && (
+          <p className={`mt-2 text-sm ${pdfNotice.kind === "error" ? "text-red-700" : "text-gray-700"}`}>
+            {pdfNotice.message}
+          </p>
+        )}
+      </div>
+
+      <form onSubmit={onSubmit} className="mt-6 space-y-6 rounded-lg border border-gray-200 p-6">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <Field label="Front label image" required>
             <input
               type="file"
               accept="image/png,image/jpeg,image/gif,image/webp"
               onChange={(e) => setFront(e.target.files?.[0] ?? null)}
-              className="block w-full text-sm"
+              className={FILE_INPUT_CLASSES}
               required
             />
           </Field>
@@ -111,7 +205,7 @@ export default function Home() {
               type="file"
               accept="image/png,image/jpeg,image/gif,image/webp"
               onChange={(e) => setBack(e.target.files?.[0] ?? null)}
-              className="block w-full text-sm"
+              className={FILE_INPUT_CLASSES}
             />
           </Field>
 

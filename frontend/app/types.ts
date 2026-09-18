@@ -20,6 +20,15 @@ export interface ApplicationOut {
   submitted_at: string;
 }
 
+export interface ExtractedApplicationFields {
+  beverage_class: BeverageClass | null;
+  imported: boolean | null;
+  brand_name: string | null;
+  fanciful_name: string | null;
+  name_address: string | null;
+  appellation: string | null;
+}
+
 export interface ExtractedLabelFields {
   brand_name: string | null;
   fanciful_name: string | null;

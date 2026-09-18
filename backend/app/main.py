@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.db import init_db
-from app.routers import batches, reviews
+from app.routers import applications, batches, reviews
 
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ app.add_middleware(
 
 app.include_router(reviews.router)
 app.include_router(batches.router)
+app.include_router(applications.router)
 
 
 @app.get("/health")

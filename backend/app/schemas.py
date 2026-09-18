@@ -29,6 +29,21 @@ class ApplicationOut(ApplicationIn):
     model_config = {"from_attributes": True}
 
 
+class ExtractedApplicationFields(BaseModel):
+    """Partial ``ApplicationIn`` fields read from a filled-in TTB F 5100.31
+    PDF's form fields. Only the subset the real form actually captures —
+    class_type, abv, net_contents, country_of_origin, and
+    sulfite_declaration aren't on the application itself and are never
+    present here; the frontend leaves those for manual entry."""
+
+    beverage_class: BeverageClass | None = None
+    imported: bool | None = None
+    brand_name: str | None = None
+    fanciful_name: str | None = None
+    name_address: str | None = None
+    appellation: str | None = None
+
+
 class ExtractedLabelFields(BaseModel):
     """The JSON shape we ask the vision model to fill in.
 

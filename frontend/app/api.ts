@@ -1,4 +1,4 @@
-import type { ReviewResult } from "./types";
+import type { ExtractedApplicationFields, ReviewResult } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -16,6 +16,12 @@ export interface ReviewFormValues {
   countryOfOrigin: string;
   appellation: string;
   sulfiteDeclaration: string;
+}
+
+async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<void> {
+  if (res.ok) return;
+  const body = await res.json().catch(() => null);
+  throw new Error(body?.detail ?? fallbackMessage);
 }
 
 function toFormData(values: ReviewFormValues): FormData {
@@ -42,10 +48,21 @@ export async function submitReview(values: ReviewFormValues): Promise<ReviewResu
     body: toFormData(values),
   });
 
-  if (!res.ok) {
-    const body = await res.json().catch(() => null);
-    throw new Error(body?.detail ?? `Review request failed (${res.status}).`);
-  }
+  await throwIfNotOk(res, `Review request failed (${res.status}).`);
 
   return (await res.json()) as ReviewResult;
+}
+
+export async function extractApplicationPdf(file: File): Promise<ExtractedApplicationFields> {
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API_BASE}/applications/extract-pdf`, {
+    method: "POST",
+    body: form,
+  });
+
+  await throwIfNotOk(res, `PDF extraction failed (${res.status}).`);
+
+  return (await res.json()) as ExtractedApplicationFields;
 }
