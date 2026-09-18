@@ -14,3 +14,8 @@ __pycache__/
 backend/uploads/
 
 # Node / Next.js (frontend/) — see frontend/.gitignore for the full set
+
+# Test gauntlet (testing/) — generated images and reports, fully
+# reproducible from generate_fixtures.py / run_gauntlet.py.
+testing/fixtures/
+testing/results/

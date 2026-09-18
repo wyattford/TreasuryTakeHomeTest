@@ -88,3 +88,35 @@ def test_illegible_fields_are_flagged_for_human_review():
     illegible = [v for v in verdicts if v.field_name == "illegible:net_contents"]
     assert len(illegible) == 1
     assert illegible[0].status == FLAGGED
+
+
+def test_abv_not_declared_and_not_on_label_matches_when_not_required():
+    # Malt beverages don't unconditionally require ABV federally — a beer
+    # label that omits it, matching an application that also omits it, is
+    # consistent and should not be flagged.
+    verdicts = compare(
+        _application(beverage_class="malt_beverage", abv=None),
+        _extracted(abv_percent=None),
+    )
+    assert _verdict(verdicts, "abv").status == MATCH
+
+
+def test_abv_not_declared_and_not_on_label_is_missing_when_required():
+    # Distilled spirits do require ABV — both sides omitting it is a real
+    # compliance gap, not a consistent absence.
+    verdicts = compare(
+        _application(beverage_class="distilled_spirits", abv=None),
+        _extracted(abv_percent=None),
+    )
+    assert _verdict(verdicts, "abv").status == MISSING
+
+
+def test_net_contents_declared_in_unparseable_unit_is_flagged_not_matched():
+    # A declared value the parser can't understand (e.g. fluid ounces) must
+    # not silently pass just because it can't be compared — it should be
+    # flagged as unverifiable instead of defaulting to a match.
+    verdicts = compare(
+        _application(net_contents="12 FL OZ"),
+        _extracted(net_contents="750 mL"),
+    )
+    assert _verdict(verdicts, "net_contents").status == FLAGGED

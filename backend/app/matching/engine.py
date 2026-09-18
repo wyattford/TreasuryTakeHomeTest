@@ -50,8 +50,12 @@ def _fuzzy_verdict(field_name: str, declared: str | None, extracted: str | None)
     return Verdict(field_name, declared, extracted, "fuzzy", MISMATCH, f"Only {ratio:.0%} similar.")
 
 
-def _abv_verdict(declared: float | None, extracted: float | None) -> Verdict:
+def _abv_verdict(declared: float | None, extracted: float | None, *, required: bool) -> Verdict:
     field_name = "abv"
+    if declared is None and extracted is None:
+        if required:
+            return Verdict(field_name, None, None, "tolerance", MISSING, "Required but not declared or found on the label.")
+        return Verdict(field_name, None, None, "tolerance", MATCH, "Not required for this label; not present.")
     if declared is None:
         return Verdict(field_name, None, _fmt(extracted), "tolerance", MISSING, "Not declared on the application.")
     if extracted is None:
@@ -81,7 +85,10 @@ def _net_contents_verdict(declared: str, extracted: str | None) -> Verdict:
         detail = f"{extracted_ml:g} mL is not one of the standard authorized container sizes (27 CFR 5.203(a))."
         return Verdict(field_name, declared, extracted, "enum", FLAGGED, detail)
     declared_ml = parse_net_contents_ml(declared)
-    if declared_ml is not None and declared_ml != extracted_ml:
+    if declared_ml is None:
+        detail = "Couldn't parse the declared net contents to verify it against the label."
+        return Verdict(field_name, declared, extracted, "enum", FLAGGED, detail)
+    if declared_ml != extracted_ml:
         return Verdict(field_name, declared, extracted, "enum", MISMATCH, "Label's net contents don't match what was declared.")
     return Verdict(field_name, declared, extracted, "enum", MATCH)
 
@@ -128,16 +135,16 @@ def _fmt(value: float | None) -> str | None:
 
 
 def compare(application: ApplicationIn, extracted: ExtractedLabelFields) -> list[Verdict]:
+    required = required_fields_for(BeverageClass(application.beverage_class), application.imported)
+
     verdicts: list[Verdict] = [
         _fuzzy_verdict("brand_name", application.brand_name, extracted.brand_name),
         _fuzzy_verdict("class_type", application.class_type, extracted.class_type),
-        _abv_verdict(application.abv, extracted.abv_percent),
+        _abv_verdict(application.abv, extracted.abv_percent, required="abv" in required),
         _net_contents_verdict(application.net_contents, extracted.net_contents),
         _fuzzy_verdict("name_address", application.name_address, extracted.name_address),
         _warning_verdict(extracted.government_warning_text),
     ]
-
-    required = required_fields_for(BeverageClass(application.beverage_class), application.imported)
 
     if application.imported or "country_of_origin" in required or application.country_of_origin:
         verdicts.append(
