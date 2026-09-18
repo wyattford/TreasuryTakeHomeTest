@@ -1,0 +1,16 @@
+ReferenceDocs/
+.env
+.env.*
+!.env.example
+.DS_Store
+.claude
+
+# Python (backend/)
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.db
+backend/uploads/
+
+# Node / Next.js (frontend/) — see frontend/.gitignore for the full set
