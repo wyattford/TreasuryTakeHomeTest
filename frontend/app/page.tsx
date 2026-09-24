@@ -2,8 +2,9 @@
 
 import { FormEvent, useState } from "react";
 import { extractApplicationPdf, submitReview } from "./api";
-import { StatusBadge } from "./StatusBadge";
+import { ReviewResultView } from "./ReviewResultView";
 import type { ExtractedApplicationFields, ReviewResult } from "./types";
+import { type LabelUpload, useLabelUpload } from "./useLabelUpload";
 
 const FILE_INPUT_CLASSES =
   "block w-full text-sm text-gray-600 file:mr-3 file:rounded-md file:border-0 file:bg-gray-900 " +
@@ -47,27 +48,6 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-const FIELD_LABELS: Record<string, string> = {
-  brand_name: "Brand name",
-  class_type: "Class / type designation",
-  abv: "Alcohol content",
-  net_contents: "Net contents",
-  name_address: "Name and address",
-  government_warning: "Government warning statement",
-  country_of_origin: "Country of origin",
-  appellation: "Appellation of origin",
-  sulfite_declaration: "Sulfite declaration",
-  other_disclosure: "Other disclosure",
-};
-
-function fieldLabel(fieldName: string): string {
-  if (fieldName.startsWith("illegible:")) {
-    const inner = fieldName.slice("illegible:".length);
-    return `${FIELD_LABELS[inner] ?? inner} (illegible on label)`;
-  }
-  return FIELD_LABELS[fieldName] ?? fieldName;
-}
-
 const EMPTY_FORM = {
   beverageClass: "distilled_spirits",
   imported: false,
@@ -84,8 +64,10 @@ const EMPTY_FORM = {
 
 export default function Home() {
   const [form, setForm] = useState(EMPTY_FORM);
-  const [front, setFront] = useState<File | null>(null);
-  const [back, setBack] = useState<File | null>(null);
+  const front = useLabelUpload();
+  const back = useLabelUpload();
+  // Bumped to remount (and so clear) the file inputs when starting over.
+  const [formKey, setFormKey] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ReviewResult | null>(null);
@@ -93,6 +75,7 @@ export default function Home() {
   const [pdfNotice, setPdfNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
   const isWine = form.beverageClass === "wine";
+  const stillReading = [front.upload, back.upload].some((u) => u?.status === "uploading" || u?.status === "reading");
 
   function set<K extends keyof typeof EMPTY_FORM>(key: K, value: (typeof EMPTY_FORM)[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -123,10 +106,22 @@ export default function Home() {
     }
   }
 
+  function startOver() {
+    front.reset();
+    back.reset();
+    setForm(EMPTY_FORM);
+    setResult(null);
+    setError(null);
+    setPdfNotice(null);
+    setFormKey((k) => k + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!front) {
-      setError("Please choose a front label image.");
+    const blocked = uploadProblem(front.upload, "front", true) ?? uploadProblem(back.upload, "back", false);
+    if (blocked) {
+      setError(blocked);
       return;
     }
     setLoading(true);
@@ -134,8 +129,8 @@ export default function Home() {
     setResult(null);
     try {
       const review = await submitReview({
-        front,
-        back,
+        frontExtractionId: front.upload!.extractionId!,
+        backExtractionId: back.upload?.extractionId ?? null,
         beverageClass: form.beverageClass,
         imported: form.imported,
         brandName: form.brandName,
@@ -149,6 +144,7 @@ export default function Home() {
         sulfiteDeclaration: form.sulfiteDeclaration,
       });
       setResult(review);
+      requestAnimationFrame(() => document.getElementById("review-result")?.scrollIntoView({ behavior: "smooth" }));
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -157,14 +153,14 @@ export default function Home() {
   }
 
   return (
-    <main className="mx-auto max-w-3xl px-4 py-10">
+    <main className="mx-auto max-w-4xl px-4 py-10">
       <h1 className="text-2xl font-semibold text-gray-900">TTB Label Review</h1>
       <p className="mt-1 text-gray-600">
-        Upload a label image and the application details declared on TTB F 5100.31 — this
-        checks that what&apos;s on the label matches what was submitted.
+        Add the label photo first — it starts being read right away. Then fill in whatever the
+        application (TTB F 5100.31) declares, and press Review.
       </p>
 
-      <div className="mt-6 rounded-lg border border-dashed border-gray-300 p-4">
+      <div key={`pdf-${formKey}`} className="mt-6 rounded-lg border border-dashed border-gray-300 p-4">
         <label className="block text-sm">
           <span className="mb-1 block font-medium text-gray-800">
             Upload TTB F 5100.31 application (optional)
@@ -189,25 +185,10 @@ export default function Home() {
         )}
       </div>
 
-      <form onSubmit={onSubmit} className="mt-6 space-y-6 rounded-lg border border-gray-200 p-6">
+      <form key={`form-${formKey}`} onSubmit={onSubmit} className="mt-6 space-y-6 rounded-lg border border-gray-200 p-6">
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label="Front label image" required>
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
-              onChange={(e) => setFront(e.target.files?.[0] ?? null)}
-              className={FILE_INPUT_CLASSES}
-              required
-            />
-          </Field>
-          <Field label="Back label image (optional)">
-            <input
-              type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
-              onChange={(e) => setBack(e.target.files?.[0] ?? null)}
-              className={FILE_INPUT_CLASSES}
-            />
-          </Field>
+          <LabelPicker title="Front label photo" required upload={front.upload} onChoose={front.choose} />
+          <LabelPicker title="Back label photo (if any)" upload={back.upload} onChoose={back.choose} />
 
           <Field label="Beverage class" required>
             <select
@@ -227,8 +208,9 @@ export default function Home() {
               type="checkbox"
               checked={form.imported}
               onChange={(e) => set("imported", e.target.checked)}
+              className="h-5 w-5"
             />
-            <label htmlFor="imported" className="text-sm text-gray-800">
+            <label htmlFor="imported" className="text-base text-gray-800">
               Imported product
             </label>
           </div>
@@ -237,15 +219,19 @@ export default function Home() {
         <h2 className="pt-2 text-sm font-semibold tracking-wide text-gray-500 uppercase">
           Application data (TTB F 5100.31)
         </h2>
+        <p className="-mt-4 text-sm text-gray-600">
+          All optional. Anything you fill in is checked against the label; anything left blank is
+          still checked on the label itself (is it there, is it a standard size, and so on).
+        </p>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <Field label="Brand name" required>
-            <input value={form.brandName} onChange={(e) => set("brandName", e.target.value)} className="input" required />
+          <Field label="Brand name">
+            <input value={form.brandName} onChange={(e) => set("brandName", e.target.value)} className="input" />
           </Field>
           <Field label="Fanciful name">
             <input value={form.fancifulName} onChange={(e) => set("fancifulName", e.target.value)} className="input" />
           </Field>
-          <Field label="Class / type designation" required>
-            <input value={form.classType} onChange={(e) => set("classType", e.target.value)} className="input" required />
+          <Field label="Class / type designation">
+            <input value={form.classType} onChange={(e) => set("classType", e.target.value)} className="input" />
           </Field>
           <Field label="Alcohol content (%)">
             <input
@@ -256,17 +242,16 @@ export default function Home() {
               className="input"
             />
           </Field>
-          <Field label="Net contents" required>
+          <Field label="Net contents">
             <input
               value={form.netContents}
               onChange={(e) => set("netContents", e.target.value)}
-              placeholder="e.g. 750 mL"
+              placeholder="e.g. 750 mL or 12 FL OZ"
               className="input"
-              required
             />
           </Field>
-          <Field label="Name and address" required>
-            <input value={form.nameAddress} onChange={(e) => set("nameAddress", e.target.value)} className="input" required />
+          <Field label="Name and address">
+            <input value={form.nameAddress} onChange={(e) => set("nameAddress", e.target.value)} className="input" />
           </Field>
           <Field label={`Country of origin${form.imported ? " (required for imports)" : ""}`}>
             <input value={form.countryOfOrigin} onChange={(e) => set("countryOfOrigin", e.target.value)} className="input" />
@@ -292,7 +277,7 @@ export default function Home() {
           disabled={loading}
           className="w-full rounded-md bg-gray-900 px-4 py-3 text-base font-medium text-white hover:bg-gray-800 disabled:opacity-50"
         >
-          {loading ? "Reviewing…" : "Review label"}
+          {loading ? (stillReading ? "Finishing reading the label…" : "Reviewing…") : "Review label"}
         </button>
       </form>
 
@@ -301,41 +286,9 @@ export default function Home() {
       )}
 
       {result && (
-        <section className="mt-8 rounded-lg border border-gray-200 p-6">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">Review result</h2>
-            <span
-              className={`rounded-full px-4 py-1 text-sm font-semibold ${
-                result.overall_status === "clear" ? "bg-green-100 text-green-800" : "bg-amber-100 text-amber-800"
-              }`}
-            >
-              {result.overall_status === "clear" ? "Clear" : "Needs review"}
-            </span>
-          </div>
-          <p className="mt-1 text-sm text-gray-500">
-            {result.model_used} · {(result.latency_ms / 1000).toFixed(1)}s
-          </p>
-
-          <div className="mt-4 divide-y divide-gray-200 border-t border-gray-200">
-            {result.comparisons.map((c, i) => (
-              <div key={`${c.field_name}-${i}`} className="grid grid-cols-1 gap-2 py-3 sm:grid-cols-[1fr_auto]">
-                <div>
-                  <div className="font-medium text-gray-900">{fieldLabel(c.field_name)}</div>
-                  {(c.application_value || c.extracted_value) && (
-                    <div className="mt-1 text-sm text-gray-600">
-                      {c.application_value && <div>Declared: {c.application_value}</div>}
-                      {c.extracted_value && <div>On label: &ldquo;{c.extracted_value}&rdquo;</div>}
-                    </div>
-                  )}
-                  {c.detail && <div className="mt-1 text-sm text-gray-500">{c.detail}</div>}
-                </div>
-                <div className="sm:justify-self-end">
-                  <StatusBadge status={c.status} />
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+        <div id="review-result">
+          <ReviewResultView result={result} onNext={startOver} />
+        </div>
       )}
 
       <p className="mt-8 text-sm text-gray-500">
@@ -344,6 +297,61 @@ export default function Home() {
       </p>
     </main>
   );
+}
+
+// Why a label image can't be submitted yet, or null if it's fine. An image
+// that's still being read (or failed to be read) is fine — the review waits
+// for it, and retries a failed read once.
+function uploadProblem(upload: LabelUpload | null, side: string, required: boolean): string | null {
+  if (!upload) return required ? `Please add a ${side} label photo.` : null;
+  if (upload.rejected) return `The ${side} label photo couldn't be used: ${upload.error} Please choose another.`;
+  if (!upload.extractionId) return `The ${side} label photo is still uploading — one moment.`;
+  return null;
+}
+
+function LabelPicker({
+  title,
+  required,
+  upload,
+  onChoose,
+}: {
+  title: string;
+  required?: boolean;
+  upload: LabelUpload | null;
+  onChoose: (file: File | null) => void;
+}) {
+  return (
+    <Field label={title} required={required}>
+      <input
+        type="file"
+        accept="image/png,image/jpeg,image/gif,image/webp"
+        onChange={(e) => onChoose(e.target.files?.[0] ?? null)}
+        className={FILE_INPUT_CLASSES}
+      />
+      {upload && <UploadStatus upload={upload} />}
+    </Field>
+  );
+}
+
+function UploadStatus({ upload }: { upload: LabelUpload }) {
+  switch (upload.status) {
+    case "uploading":
+      return <p className="mt-2 text-sm text-gray-600">Uploading…</p>;
+    case "reading":
+      return <p className="mt-2 text-sm text-gray-600">Reading the label… you can keep filling in the form.</p>;
+    case "done":
+      return (
+        <p className="mt-2 text-sm text-green-700">
+          ✓ Label read{upload.latencyMs !== null ? ` (${(upload.latencyMs / 1000).toFixed(1)}s)` : ""}
+        </p>
+      );
+    case "error":
+      return (
+        <p className="mt-2 text-sm text-red-700">
+          {upload.rejected ? upload.error : `Couldn't read this yet (${upload.error}). It will be tried again when you press Review.`}
+        </p>
+      );
+  }
 }
 
 function Field({

@@ -14,12 +14,12 @@ const LABELS: Record<FieldStatus, string> = {
   missing: "Missing",
 };
 
-export function StatusBadge({ status }: { status: FieldStatus }) {
+export function StatusBadge({ status, label }: { status: FieldStatus; label?: string }) {
   return (
     <span
       className={`inline-block rounded-full border px-3 py-1 text-sm font-medium whitespace-nowrap ${STYLES[status]}`}
     >
-      {LABELS[status]}
+      {label ?? LABELS[status]}
     </span>
   );
 }
