@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -7,16 +8,21 @@ from app.data.ttb_rules import BeverageClass
 
 class ApplicationIn(BaseModel):
     """What an applicant declares on TTB F 5100.31 — submitted alongside the
-    label image(s) so we have something to check the label against."""
+    label image(s) so we have something to check the label against.
+
+    Only the beverage class and import status are required, since they decide
+    which rules apply. Every declared value is optional: a field left blank is
+    checked against the label's own requirements instead of against the
+    application (e.g. "is a brand name printed at all?")."""
 
     beverage_class: BeverageClass
     imported: bool = False
-    brand_name: str
+    brand_name: str | None = None
     fanciful_name: str | None = None
-    class_type: str
+    class_type: str | None = None
     abv: float | None = None
-    net_contents: str
-    name_address: str
+    net_contents: str | None = None
+    name_address: str | None = None
     country_of_origin: str | None = None
     appellation: str | None = None
     sulfite_declaration: str | None = None
@@ -45,7 +51,7 @@ class ExtractedApplicationFields(BaseModel):
 
 
 class ExtractedLabelFields(BaseModel):
-    """The JSON shape we ask the vision model to fill in.
+    """The JSON shape we ask the vision model to fill in, once per label image.
 
     Sent to Ollama as a schema described in the prompt text (NOT via Ollama's
     `format`/grammar-constrained decoding — see the note in
@@ -56,7 +62,10 @@ class ExtractedLabelFields(BaseModel):
 
     brand_name: str | None = Field(
         default=None,
-        description="Brand name as printed on the label — the main product/producer name, e.g. 'OLD TOM DISTILLERY'",
+        description=(
+            "Brand name as featured on the label — usually the most prominent text on the front label, "
+            "e.g. 'OLD TOM DISTILLERY'. Never take it from the name-and-address statement."
+        ),
     )
     fanciful_name: str | None = Field(
         default=None,
@@ -76,13 +85,25 @@ class ExtractedLabelFields(BaseModel):
         default=None,
         description="Alcohol content as a bare number, percent by volume, e.g. 45.0 for '45% Alc./Vol.'",
     )
+    proof: float | None = Field(
+        default=None,
+        description="Proof as a bare number if a proof statement is printed, e.g. 90 for '90 Proof'. Usually null.",
+    )
     net_contents: str | None = Field(default=None, description="Net contents as printed, e.g. '750 mL'")
-    name_address: str | None = Field(default=None, description="Bottler/producer/importer name and address statement")
+    name_address: str | None = Field(
+        default=None,
+        description=(
+            "The complete bottler/producer/importer name-and-address statement, verbatim and in full, joining "
+            "all of its lines — including the company name it starts with, e.g. 'Maison Duval, Imported by "
+            "Coastal Wines, Boston, MA' or 'Bottled by Old Mill Distilling Co., Frankfort, KY'."
+        ),
+    )
     country_of_origin: str | None = Field(
         default=None,
         description=(
-            "Country of origin statement, if present. Leave null for a domestic (non-imported) "
-            "product even if the label mentions a US state or city."
+            "Country of origin statement, if present, e.g. 'Product of France'. Only an explicit "
+            "statement of where the product was made — never a city or state taken from a bottler's "
+            "or importer's address."
         ),
     )
     appellation: str | None = Field(default=None, description="Appellation of origin, if present (wine)")
@@ -90,8 +111,9 @@ class ExtractedLabelFields(BaseModel):
     government_warning_text: str | None = Field(
         default=None,
         description=(
-            "Verbatim transcription of the ENTIRE Government Warning statement, starting with the "
-            "words 'GOVERNMENT WARNING:' and preserving capitalization"
+            "Verbatim transcription of the ENTIRE Government Warning statement, preserving capitalization "
+            "exactly as printed. Only if a warning paragraph is actually printed on this label — usually a "
+            "boxed paragraph on the back label; most front labels have none, and then this is null."
         ),
     )
     other_disclosures: list[str] = Field(
@@ -110,6 +132,29 @@ class ExtractedLabelFields(BaseModel):
     )
 
 
+class ExtractionOut(BaseModel):
+    """Status of one label image's background extraction."""
+
+    id: str
+    status: Literal["pending", "done", "error", "cancelled"]
+    error_message: str | None = None
+    latency_ms: int | None = None
+    extracted_fields: ExtractedLabelFields | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class DecisionIn(BaseModel):
+    decision: Literal["accept", "reject", "follow_up"]
+    note: str | None = None
+
+
+class DecisionOut(DecisionIn):
+    decided_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class FieldComparisonOut(BaseModel):
     field_name: str
     application_value: str | None
@@ -123,11 +168,16 @@ class FieldComparisonOut(BaseModel):
 
 class ReviewResult(BaseModel):
     application: ApplicationOut
+    front_extraction_id: str
+    back_extraction_id: str | None
     extracted_fields: ExtractedLabelFields
+    field_sources: dict[str, Literal["front", "back"]]
     comparisons: list[FieldComparisonOut]
     model_used: str
-    latency_ms: int
+    latency_ms: int  # time the user waited after submitting
+    extraction_ms: int  # time the model spent reading the label
     overall_status: str  # "clear" | "flagged"
+    decision: DecisionOut | None = None
 
 
 class BatchItemOut(BaseModel):

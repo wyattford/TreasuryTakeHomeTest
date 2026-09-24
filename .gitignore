@@ -11,6 +11,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.db
+*.db.*.bak
 backend/uploads/
 
 # Node / Next.js (frontend/) — see frontend/.gitignore for the full set

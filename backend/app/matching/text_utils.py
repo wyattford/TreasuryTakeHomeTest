@@ -34,18 +34,58 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, normalize(a), normalize(b)).ratio()
 
 
-_NET_CONTENTS_RE = re.compile(r"([\d.]+)\s*(ml|milliliters?|l|liters?|litres?)\b", re.IGNORECASE)
+_ML_PER_UNIT: dict[str, float] = {
+    "ml": 1.0,
+    "cl": 10.0,
+    "l": 1000.0,
+    "fl oz": 29.5735,
+    "pint": 473.176,
+    "quart": 946.353,
+    "gallon": 3785.41,
+}
+
+# Each alternative maps onto a key of _ML_PER_UNIT. Metric and US customary
+# units are matched separately below: a label like "750 mL (25.4 FL OZ)"
+# states the same volume twice, whereas "1 PINT 8 FL OZ" is one volume split
+# across two units and has to be summed.
+_METRIC_RE = re.compile(
+    r"(\d+(?:[.,]\d+)?)\s*(ml|milliliters?|millilitres?|cl|centiliters?|centilitres?|l|liters?|litres?)\b", re.I
+)
+_US_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(fl\.?\s*oz\.?|fluid\s+ounces?|pints?|pts?\b|quarts?|qts?\b|gallons?|gal\b)", re.I)
+
+
+def _metric_unit(raw: str) -> str:
+    raw = raw.lower()
+    if raw.startswith("m"):
+        return "ml"
+    if raw.startswith("c"):
+        return "cl"
+    return "l"
+
+
+def _us_unit(raw: str) -> str:
+    raw = raw.lower()
+    if raw.startswith("f"):
+        return "fl oz"
+    if raw.startswith("p"):
+        return "pint"
+    if raw.startswith("q"):
+        return "quart"
+    return "gallon"
 
 
 def parse_net_contents_ml(text: str) -> float | None:
-    """Parses a net-contents string like "750 mL" or "1.75 L" into
-    milliliters. Returns None if it can't be parsed."""
+    """Parses a net-contents string into milliliters: "750 mL", "75 cl",
+    "1.75 L", "12 FL OZ", "1 PINT 8 FL OZ", "750 mL (25.4 FL OZ)". The metric
+    statement wins when both are present. Returns None if nothing parses."""
 
-    match = _NET_CONTENTS_RE.search(text)
-    if not match:
+    metric = _METRIC_RE.search(text)
+    if metric:
+        value = float(metric.group(1).replace(",", "."))
+        return round(value * _ML_PER_UNIT[_metric_unit(metric.group(2))], 2)
+
+    us_matches = list(_US_RE.finditer(text))
+    if not us_matches:
         return None
-    value = float(match.group(1))
-    unit = match.group(2).lower()
-    if unit.startswith("l"):
-        value *= 1000
-    return value
+    total = sum(float(m.group(1)) * _ML_PER_UNIT[_us_unit(m.group(2))] for m in us_matches)
+    return round(total, 2)

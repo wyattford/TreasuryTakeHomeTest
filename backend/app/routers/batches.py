@@ -8,14 +8,15 @@ and test properly.
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.data.ttb_rules import BeverageClass
 from app.db import get_db
-from app.inference.ollama_client import OllamaUnavailableError
-from app.models import Application, BatchItem, ExtractionResult, ReviewBatch
-from app.review_service import build_review_result, create_application_with_images, run_review
+from app.models import Application, BatchItem, ReviewBatch
+from app.review_service import ExtractionFailedError, build_review_result, create_application, latest_review_run, run_review
+from app.routers.forms import declared_application_form, resolve_label_image
 from app.schemas import ApplicationIn, BatchItemOut, BatchSummary
 
 router = APIRouter(prefix="/batches", tags=["batches"])
@@ -32,59 +33,32 @@ def create_batch(db: Session = Depends(get_db)) -> BatchSummary:
 @router.post("/{batch_id}/items", response_model=BatchItemOut)
 async def add_batch_item(
     batch_id: str,
-    front: UploadFile = File(...),
+    front: UploadFile | None = File(None),
     back: UploadFile | None = File(None),
-    beverage_class: BeverageClass = Form(...),
-    imported: bool = Form(False),
-    brand_name: str = Form(...),
-    fanciful_name: str | None = Form(None),
-    class_type: str = Form(...),
-    abv: float | None = Form(None),
-    net_contents: str = Form(...),
-    name_address: str = Form(...),
-    country_of_origin: str | None = Form(None),
-    appellation: str | None = Form(None),
-    sulfite_declaration: str | None = Form(None),
+    front_extraction_id: str | None = Form(None),
+    back_extraction_id: str | None = Form(None),
+    declared: ApplicationIn = Depends(declared_application_form),
     db: Session = Depends(get_db),
 ) -> BatchItemOut:
     batch = db.get(ReviewBatch, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="No batch with that id.")
 
-    front_bytes = await front.read()
-    back_bytes = await back.read() if back is not None else None
+    started = time.monotonic()
+    front_id = await resolve_label_image(db, side="front", file=front, extraction_id=front_extraction_id, required=True)
+    back_id = await resolve_label_image(db, side="back", file=back, extraction_id=back_extraction_id, required=False)
 
-    application = create_application_with_images(
-        db,
-        ApplicationIn(
-            beverage_class=beverage_class,
-            imported=imported,
-            brand_name=brand_name,
-            fanciful_name=fanciful_name,
-            class_type=class_type,
-            abv=abv,
-            net_contents=net_contents,
-            name_address=name_address,
-            country_of_origin=country_of_origin,
-            appellation=appellation,
-            sulfite_declaration=sulfite_declaration,
-        ),
-        front_bytes=front_bytes,
-        front_content_type=front.content_type or "image/jpeg",
-        back_bytes=back_bytes,
-        back_content_type=back.content_type if back else None,
-    )
-
+    application = create_application(db, declared, front_extraction_id=front_id, back_extraction_id=back_id)
     item = BatchItem(batch_id=batch_id, application_id=application.id, status="pending")
     db.add(item)
     db.commit()
 
     try:
-        result = await run_review(db, application, front_bytes, back_bytes)
+        result = await run_review(db, application, started=started)
         item.status = "done"
         db.commit()
         return BatchItemOut(application_id=application.id, status="done", error_message=None, result=result)
-    except OllamaUnavailableError as exc:
+    except ExtractionFailedError as exc:
         item.status = "error"
         item.error_message = str(exc)
         db.commit()
@@ -105,14 +79,9 @@ def _summarize(db: Session, batch: ReviewBatch) -> BatchSummary:
         result = None
         if item.status == "done":
             application = db.get(Application, item.application_id)
-            extraction = (
-                db.query(ExtractionResult)
-                .filter(ExtractionResult.application_id == item.application_id)
-                .order_by(ExtractionResult.created_at.desc())
-                .first()
-            )
-            if application is not None and extraction is not None:
-                result = build_review_result(application, extraction)
+            run = latest_review_run(db, item.application_id)
+            if application is not None and run is not None:
+                result = build_review_result(application, run)
         items.append(
             BatchItemOut(application_id=item.application_id, status=item.status, error_message=item.error_message, result=result)
         )

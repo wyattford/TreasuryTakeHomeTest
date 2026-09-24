@@ -1,63 +1,72 @@
-"""Orchestrates one end-to-end review: create the application record, extract
-fields from the label image(s), compare them against what was declared, and
-persist all of it. Shared by the single-review and batch endpoints so there's
-exactly one place that defines what "reviewing a label" means.
+"""Orchestrates one end-to-end review: wait for the label image(s) to finish
+extracting (usually already done — extraction starts on upload), merge the
+front and back readings, compare them against what was declared, and persist
+all of it. Shared by the single-review and batch endpoints so there's exactly
+one place that defines what "reviewing a label" means.
 """
 
 from __future__ import annotations
 
+import time
+
 from sqlalchemy.orm import Session
 
-from app.inference.ollama_client import extract_label_fields
+from app.config import settings
+from app.extraction_service import DONE, wait_for_extraction
 from app.matching.engine import MATCH, compare
-from app.models import Application, ExtractionResult, FieldComparison
-from app.schemas import ApplicationIn, ApplicationOut, ExtractedLabelFields, FieldComparisonOut, ReviewResult
-from app.storage import save_label_image_record
+from app.matching.merge import merge_extractions
+from app.models import Application, FieldComparison, ImageExtraction, ReviewRun
+from app.schemas import (
+    ApplicationIn,
+    ApplicationOut,
+    DecisionOut,
+    ExtractedLabelFields,
+    FieldComparisonOut,
+    ReviewResult,
+)
 
 
-def create_application_with_images(
-    db: Session,
-    data: ApplicationIn,
-    *,
-    front_bytes: bytes,
-    front_content_type: str,
-    back_bytes: bytes | None,
-    back_content_type: str | None,
+class ExtractionFailedError(RuntimeError):
+    """A label image couldn't be read (Ollama down, unusable response)."""
+
+
+def create_application(
+    db: Session, data: ApplicationIn, *, front_extraction_id: str, back_extraction_id: str | None
 ) -> Application:
-    """Persists the declared application fields and its label image(s)."""
-
-    application = Application(**data.model_dump())
+    application = Application(**data.model_dump(), front_extraction_id=front_extraction_id, back_extraction_id=back_extraction_id)
     db.add(application)
     db.flush()  # assigns application.id without committing yet
-
-    save_label_image_record(db, application.id, "front", front_bytes, front_content_type)
-    if back_bytes is not None:
-        save_label_image_record(db, application.id, "back", back_bytes, back_content_type or "image/jpeg")
-
     return application
 
 
-async def run_review(db: Session, application: Application, front_image: bytes, back_image: bytes | None) -> ReviewResult:
-    extracted, latency_ms = await extract_label_fields(
-        front_image=front_image,
-        back_image=back_image,
-        beverage_class=application.beverage_class,
-        imported=application.imported,
-    )
+async def run_review(db: Session, application: Application, *, started: float | None = None) -> ReviewResult:
+    """``started`` is a time.monotonic() timestamp for when the user asked for
+    the review, so the reported latency is what they actually waited."""
 
-    extraction = ExtractionResult(
+    started = time.monotonic() if started is None else started
+
+    front = await _finished_extraction(db, application.front_extraction_id, "front")
+    back = await _finished_extraction(db, application.back_extraction_id, "back") if application.back_extraction_id else None
+
+    merged, sources = merge_extractions(
+        ExtractedLabelFields.model_validate(front.extracted_fields),
+        ExtractedLabelFields.model_validate(back.extracted_fields) if back else None,
+    )
+    verdicts = compare(ApplicationIn.model_validate(application, from_attributes=True), merged, sources)
+
+    run = ReviewRun(
         application_id=application.id,
-        extracted_fields=extracted.model_dump(),
-        model_used="ollama",  # the specific model name lives in settings; kept generic here
-        latency_ms=latency_ms,
+        extracted_fields=merged.model_dump(),
+        field_sources=sources,
+        model_used=settings.ollama_model,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        extraction_ms=max(e.latency_ms or 0 for e in (front, back) if e is not None),
     )
-    db.add(extraction)
-    db.flush()  # assigns extraction.id without committing yet
-
-    verdicts = compare(_to_application_in(application), extracted)
+    db.add(run)
+    db.flush()  # assigns run.id without committing yet
     db.add_all(
         FieldComparison(
-            extraction_result_id=extraction.id,
+            review_run_id=run.id,
             field_name=v.field_name,
             application_value=v.application_value,
             extracted_value=v.extracted_value,
@@ -69,25 +78,37 @@ async def run_review(db: Session, application: Application, front_image: bytes, 
     )
     db.commit()
 
-    return build_review_result(application, extraction)
+    return build_review_result(application, run)
 
 
-def build_review_result(application: Application, extraction: ExtractionResult) -> ReviewResult:
+async def _finished_extraction(db: Session, extraction_id: str, side: str) -> ImageExtraction:
+    record = await wait_for_extraction(db, extraction_id, retry_failed=True)
+    if record.status != DONE:
+        raise ExtractionFailedError(f"Couldn't read the {side} label image: {record.error_message or record.status}")
+    return record
+
+
+def latest_review_run(db: Session, application_id: str) -> ReviewRun | None:
+    return db.query(ReviewRun).filter(ReviewRun.application_id == application_id).order_by(ReviewRun.created_at.desc()).first()
+
+
+def build_review_result(application: Application, run: ReviewRun) -> ReviewResult:
     """Assembles the API response shape from a persisted application + its
-    extraction (and, via the relationship, comparisons). Used both right
-    after a fresh review and when re-fetching a stored one."""
+    review run (and, via the relationships, comparisons and decision). Used
+    both right after a fresh review and when re-fetching a stored one."""
 
-    comparisons = extraction.comparisons
+    comparisons = run.comparisons
     overall_status = "clear" if all(c.status == MATCH for c in comparisons) else "flagged"
     return ReviewResult(
         application=ApplicationOut.model_validate(application),
-        extracted_fields=ExtractedLabelFields.model_validate(extraction.extracted_fields),
+        front_extraction_id=application.front_extraction_id,
+        back_extraction_id=application.back_extraction_id,
+        extracted_fields=ExtractedLabelFields.model_validate(run.extracted_fields),
+        field_sources=run.field_sources,
         comparisons=[FieldComparisonOut.model_validate(c) for c in comparisons],
-        model_used=extraction.model_used,
-        latency_ms=extraction.latency_ms,
+        model_used=run.model_used,
+        latency_ms=run.latency_ms,
+        extraction_ms=run.extraction_ms,
         overall_status=overall_status,
+        decision=DecisionOut.model_validate(application.decision) if application.decision else None,
     )
-
-
-def _to_application_in(application: Application) -> ApplicationIn:
-    return ApplicationIn.model_validate(application, from_attributes=True)

@@ -3,7 +3,8 @@ Parts 4, 5, 7, and 16 — see ttb.gov/regulated-commodities/labeling).
 
 This module is the single source of truth for the regulatory facts the
 matching engine relies on: the exact Government Warning text, the ABV
-tolerance, and the standard container sizes. Keeping these as plain data
+tolerance, the per-class standard container sizes, and which fields have
+placement rules. Keeping these as plain data
 (not scattered through the matching logic) makes them easy to audit against
 the regulation and easy to unit test in isolation.
 """
@@ -36,33 +37,105 @@ ABV_TOLERANCE_PERCENTAGE_POINTS = 0.3
 # 27 CFR 5.203(a) — authorized standard-of-fill container sizes for distilled
 # spirits, in milliliters. A net-contents value that isn't one of these is a
 # compliance flag independent of whether it matches the application.
-STANDARD_FILL_SIZES_ML: set[float] = {
-    3750,
-    3000,
-    2000,
-    1800,
-    1750,
-    1500,
-    1000,
-    945,
-    900,
-    750,
-    720,
-    710,
-    700,
-    570,
-    500,
-    475,
-    375,
-    355,
-    350,
-    331,
-    250,
-    200,
-    187,
-    100,
-    50,
-}
+DISTILLED_SPIRITS_FILL_SIZES_ML: frozenset[float] = frozenset(
+    {
+        3750,
+        3000,
+        2000,
+        1800,
+        1750,
+        1500,
+        1000,
+        945,
+        900,
+        750,
+        720,
+        710,
+        700,
+        570,
+        500,
+        475,
+        375,
+        355,
+        350,
+        331,
+        250,
+        200,
+        187,
+        100,
+        50,
+    }
+)
+
+# 27 CFR 4.72(a) — authorized standard-of-fill container sizes for wine, in
+# milliliters. 4.72(b) additionally allows any container of 4 liters or more
+# filled in even liters (4 L, 5 L, 6 L, ...) — see is_standard_fill().
+WINE_FILL_SIZES_ML: frozenset[float] = frozenset(
+    {
+        3000,
+        2250,
+        1800,
+        1500,
+        1000,
+        750,
+        720,
+        700,
+        620,
+        600,
+        568,
+        550,
+        500,
+        473,
+        375,
+        360,
+        355,
+        330,
+        300,
+        250,
+        200,
+        187,
+        180,
+        100,
+        50,
+    }
+)
+WINE_LARGE_CONTAINER_MIN_ML = 4000
+
+# Labels often state net contents in US units that don't convert to a whole
+# number of milliliters (12 FL OZ = 354.88 mL, 25.4 FL OZ = 751.2 mL), so
+# container-size comparisons allow this much slack instead of demanding exact
+# equality.
+NET_CONTENTS_TOLERANCE_ML = 2.0
+
+# Proof is defined as twice the alcohol content by volume. Labels round both
+# figures, so allow a little slack before calling them inconsistent.
+PROOF_TOLERANCE = 0.5
+
+# 27 CFR 4.32(a) — on wine, these must appear on the brand (front) label; the
+# rest of the mandatory information may appear on any label on the container.
+WINE_BRAND_LABEL_FIELDS: tuple[str, ...] = ("brand_name", "class_type")
+
+
+def standard_fill_sizes_for(beverage_class: BeverageClass) -> frozenset[float] | None:
+    """Authorized container sizes for a class, or None if the class has no
+    federal standard of fill (malt beverages don't)."""
+
+    return {
+        BeverageClass.DISTILLED_SPIRITS: DISTILLED_SPIRITS_FILL_SIZES_ML,
+        BeverageClass.WINE: WINE_FILL_SIZES_ML,
+    }.get(beverage_class)
+
+
+def is_standard_fill(beverage_class: BeverageClass, ml: float) -> bool:
+    sizes = standard_fill_sizes_for(beverage_class)
+    if sizes is None:
+        return True
+    if any(abs(ml - size) <= NET_CONTENTS_TOLERANCE_ML for size in sizes):
+        return True
+    if beverage_class == BeverageClass.WINE and ml >= WINE_LARGE_CONTAINER_MIN_ML:
+        return abs(ml / 1000 - round(ml / 1000)) * 1000 <= NET_CONTENTS_TOLERANCE_ML
+    return False
+
 
 # Fields required on every label, regardless of beverage class.
 COMMON_REQUIRED_FIELDS: tuple[str, ...] = (

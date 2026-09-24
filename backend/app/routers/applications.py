@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
 from app.application_pdf import ApplicationPdfError, extract_application_pdf_fields
+from app.routers.forms import read_upload
 from app.schemas import ExtractedApplicationFields
 
 router = APIRouter(prefix="/applications", tags=["applications"])
@@ -15,7 +16,7 @@ router = APIRouter(prefix="/applications", tags=["applications"])
 
 @router.post("/extract-pdf", response_model=ExtractedApplicationFields)
 async def extract_pdf(file: UploadFile = File(...)) -> ExtractedApplicationFields:
-    pdf_bytes = await file.read()
+    pdf_bytes = await read_upload(file)
     try:
         # pypdf's parsing is synchronous CPU work; run it off the event loop
         # so it doesn't stall other requests (reviews, batches) for its duration.

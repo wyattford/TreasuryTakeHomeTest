@@ -29,7 +29,6 @@ once on parse failure) instead.
 from __future__ import annotations
 
 import base64
-import json
 import re
 import time
 
@@ -38,23 +37,40 @@ import httpx
 from app.config import settings
 from app.schemas import ExtractedLabelFields
 
-_SCHEMA_DESCRIPTION = json.dumps(ExtractedLabelFields.model_json_schema(), indent=2)
+
+def _describe_fields() -> str:
+    """One line per field, generated from ExtractedLabelFields so the prompt
+    can't drift from the schema the response is validated against. Much
+    shorter than a JSON Schema dump — the model re-reads the whole system
+    prompt for every image, so prompt length is paid on every extraction."""
+
+    lines = []
+    for name, field in ExtractedLabelFields.model_fields.items():
+        if field.annotation == list[str]:
+            kind = "list of strings, may be empty"
+        else:
+            kind = ("number" if "float" in str(field.annotation) else "string") + " or null"
+        lines.append(f'- "{name}" ({kind}): {field.description}')
+    return "\n".join(lines)
+
 
 EXTRACTION_SYSTEM_PROMPT = f"""\
 You are a TTB alcohol beverage label compliance assistant. You are shown one \
-or two photos of an alcohol beverage label (a front label, and optionally a \
-back label) and must transcribe what is printed on it into a JSON object.
+photo of one label from an alcohol beverage container (it may be the front \
+label, a back label, or the only label) and must transcribe what is printed \
+on it into a JSON object.
 
 Transcribe text VERBATIM, including capitalization — this matters for \
-compliance checks. If a field is not visible on either image, use null. \
-If a field is present but you cannot read it with confidence (blur, glare, \
-odd angle, cut off), use null for it AND add its field name to \
-illegible_fields rather than guessing. Do not infer or invent values that \
-are not visibly printed on the label.
+compliance checks. Leave out any field that is not printed on this label — that is normal, \
+since a back label usually carries only some of the fields, and a missing \
+field is NOT illegible. Only list a field in illegible_fields when you can \
+see its text printed on the label but cannot read it with confidence (blur, \
+glare, odd angle, cut off) — never guess such a field's value. Do not infer \
+or invent values that are not visibly printed on this label.
 
 Respond with ONLY a single JSON object — no markdown code fences, no \
-explanation before or after — matching this JSON Schema exactly:
-{_SCHEMA_DESCRIPTION}"""
+explanation before or after — using these keys:
+{_describe_fields()}"""
 
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
@@ -75,39 +91,22 @@ def _extract_json_object(content: str) -> str:
     return match.group(0) if match else content
 
 
-async def extract_label_fields(
-    *,
-    front_image: bytes,
-    back_image: bytes | None,
-    beverage_class: str,
-    imported: bool,
-) -> tuple[ExtractedLabelFields, int]:
-    """Runs one extraction pass over a label's image(s).
+async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]:
+    """Runs one extraction pass over a single label image.
+
+    Deliberately takes nothing but the image — no beverage class, no import
+    status — so extraction can start the moment a photo is uploaded, before
+    the user has filled in anything else. Deciding which fields matter for
+    this product is the matching engine's job, not the model's.
 
     Returns the parsed fields and the elapsed latency in milliseconds.
     Raises OllamaUnavailableError if the server can't be reached, the model
     isn't pulled, or the response still can't be parsed after one retry.
     """
 
-    images = [_image_content(front_image)]
-    if back_image is not None:
-        images.append(_image_content(back_image))
-
-    origin_note = (
-        "This is an imported product; look for a country of origin statement."
-        if imported
-        else "This is a domestic product; leave country_of_origin null."
-    )
-    image_count_note = (
-        "Two images are provided: the front label, then the back label."
-        if back_image
-        else "One image is provided: the front (only) label."
-    )
-    user_prompt = f"Beverage class: {beverage_class}. {origin_note} {image_count_note}"
-
     messages = [
         {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-        {"role": "user", "content": user_prompt, "images": images},
+        {"role": "user", "content": "Transcribe this label.", "images": [_image_content(image)]},
     ]
 
     started = time.monotonic()
@@ -135,6 +134,7 @@ async def _chat(client: httpx.AsyncClient, messages: list[dict]) -> str:
         "model": settings.ollama_model,
         "messages": messages,
         "stream": False,
+        "keep_alive": settings.ollama_keep_alive,
         "options": {"temperature": 0},
     }
     try:
@@ -153,3 +153,16 @@ async def _chat(client: httpx.AsyncClient, messages: list[dict]) -> str:
     if not content:
         raise OllamaUnavailableError(f"Ollama returned no content: {body}")
     return content
+
+
+async def warm_up() -> None:
+    """Asks Ollama to load the model into memory without generating anything,
+    so the first real extraction doesn't pay the ~20s cold-load cost. Best
+    effort: if Ollama isn't up yet, the first real request just loads it."""
+
+    payload = {"model": settings.ollama_model, "keep_alive": settings.ollama_keep_alive}
+    try:
+        async with httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=settings.ollama_timeout_seconds) as client:
+            await client.post("/api/generate", json=payload)
+    except httpx.HTTPError:
+        pass
