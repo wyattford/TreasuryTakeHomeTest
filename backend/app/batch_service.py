@@ -277,8 +277,7 @@ def _eta_seconds(batch: ReviewBatch, counts: BatchCounts) -> int | None:
     remaining = counts.awaiting_images + counts.queued
     if batch.started_at is None or finished == 0 or remaining == 0 or batch.cancelled_at is not None:
         return None
-    started = batch.started_at if batch.started_at.tzinfo else batch.started_at.replace(tzinfo=UTC)
-    elapsed = (datetime.now(UTC) - started).total_seconds()
+    elapsed = (datetime.now(UTC) - batch.started_at).total_seconds()
     return round(elapsed / finished * remaining)
 
 

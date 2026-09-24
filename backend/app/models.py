@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import JSON, DateTime, Float, ForeignKey, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator
 
 from app.db import Base
 
@@ -13,6 +14,20 @@ def _uuid() -> str:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+class UTCDateTime(TypeDecorator):
+    """A timezone-aware UTC datetime column. SQLite stores datetimes without
+    a zone, so without this they'd come back naive and be serialized with no
+    offset — and a browser reads an offset-less time as *local* time."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
 
 
 class ImageExtraction(Base):
@@ -42,8 +57,8 @@ class ImageExtraction(Base):
     priority: Mapped[str] = mapped_column(String, nullable=False, default="interactive")
     model_used: Mapped[str] = mapped_column(String, nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
 
 class Application(Base):
@@ -73,7 +88,7 @@ class Application(Base):
     front_extraction_id: Mapped[str] = mapped_column(ForeignKey("image_extractions.id"), nullable=False)
     back_extraction_id: Mapped[str | None] = mapped_column(ForeignKey("image_extractions.id"), nullable=True)
 
-    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    submitted_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
     review_runs: Mapped[list["ReviewRun"]] = relationship(back_populates="application")
     decision: Mapped["ReviewDecision | None"] = relationship(back_populates="application")
@@ -96,7 +111,7 @@ class ReviewRun(Base):
     latency_ms: Mapped[int] = mapped_column(nullable=False)
     # How long the model itself took to read the label (slowest image).
     extraction_ms: Mapped[int] = mapped_column(nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
 
     application: Mapped[Application] = relationship(back_populates="review_runs")
     comparisons: Mapped[list["FieldComparison"]] = relationship(back_populates="review_run")
@@ -130,7 +145,7 @@ class ReviewDecision(Base):
     application_id: Mapped[str] = mapped_column(ForeignKey("applications.id"), nullable=False, unique=True)
     decision: Mapped[str] = mapped_column(String, nullable=False)  # accept/reject/follow_up
     note: Mapped[str | None] = mapped_column(String, nullable=True)
-    decided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    decided_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now, onupdate=_now)
 
     application: Mapped[Application] = relationship(back_populates="decision")
 
@@ -144,11 +159,11 @@ class ReviewBatch(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     name: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=_now)
     # When the first item's images arrived — the start of review work, used
     # for the progress estimate.
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
 
     items: Mapped[list["BatchItem"]] = relationship(back_populates="batch", order_by="BatchItem.row_number")
 

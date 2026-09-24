@@ -98,7 +98,10 @@ async def wait_for_extraction(
 
     ``retry_failed`` re-runs an extraction that previously errored or was
     cancelled — used when a review actually needs the result, e.g. if Ollama
-    was briefly down when the image was first uploaded."""
+    was briefly down when the image was first uploaded.
+
+    Commits the session's current transaction before waiting, so callers
+    must not have changes pending that they don't mean to commit."""
 
     record = db.get(ImageExtraction, extraction_id)
     if record is None:
@@ -115,6 +118,11 @@ async def wait_for_extraction(
 
     task = _tasks.get(extraction_id)
     if task is not None:
+        # Hand the session's pooled connection back for the wait, which can
+        # be minutes long behind a batch. Holding it would let enough waiters
+        # (a big batch, many long-polls) drain the pool, and the next
+        # checkout would then block the event loop the waiters need.
+        db.commit()
         # asyncio.wait (unlike wait_for) never cancels the task when the
         # caller gives up — someone else may still be waiting on it — and
         # doesn't raise if the task itself was cancelled.

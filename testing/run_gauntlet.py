@@ -13,6 +13,7 @@ Usage:
     python run_gauntlet.py --base-url http://localhost:8000
     python run_gauntlet.py --only blur_correct rotate_incorrect
     python run_gauntlet.py --tag distortion
+    python run_gauntlet.py --batch        # submit every case as one batch instead
 """
 
 from __future__ import annotations
@@ -78,6 +79,67 @@ def submit_case(client: httpx.Client, case: dict, *, retries: int = 2) -> dict:
         if attempt < retries:
             time.sleep(2.0)
     raise last_error
+
+
+def run_as_batch(client: httpx.Client, cases: list[dict], *, poll_seconds: float = 2.0) -> dict[str, dict]:
+    """Submits every case as rows of one batch through the batch API (create,
+    upload + attach each row's images, wait for the background runner), then
+    fetches each row's review. Returns case id -> review result, or
+    {"error": ...} for rows that failed."""
+
+    rows = [
+        {
+            **case["declared"],
+            "reference": case["id"],
+            "front_image": f"{case['id']}_front.png",
+            "back_image": f"{case['id']}_back.png",
+        }
+        for case in cases
+    ]
+    response = client.post("/batches", json={"name": f"Gauntlet {time.strftime('%Y-%m-%d %H:%M')}", "rows": rows})
+    response.raise_for_status()
+    batch = response.json()
+    by_reference = {item["reference"]: item for item in batch["items"]}
+
+    started = time.monotonic()
+    for case in cases:
+        ids = []
+        for key in ("front_image", "back_image"):
+            path = TESTING_DIR / case[key]
+            with path.open("rb") as fh:
+                uploaded = client.post(
+                    "/extractions", params={"priority": "batch"}, files={"image": (path.name, fh, "image/png")}
+                )
+            uploaded.raise_for_status()
+            ids.append(uploaded.json()["id"])
+        item_id = by_reference[case["id"]]["id"]
+        attach = client.put(
+            f"/batches/{batch['id']}/items/{item_id}/images",
+            json={"front_extraction_id": ids[0], "back_extraction_id": ids[1]},
+        )
+        attach.raise_for_status()
+    print(f"Uploaded {len(cases)} applications in {time.monotonic() - started:.1f}s; waiting for the batch ...")
+
+    while True:
+        batch = client.get(f"/batches/{batch['id']}").json()
+        counts = batch["counts"]
+        finished = counts["clear"] + counts["flagged"] + counts["error"]
+        print(f"  {finished}/{batch['total']} reviewed", end="\r", flush=True)
+        if batch["status"] != "running":
+            break
+        time.sleep(poll_seconds)
+    elapsed = time.monotonic() - started
+    print(f"\nBatch finished in {elapsed:.1f}s ({2 * len(cases) / elapsed * 60:.1f} images/min, including cached reads)")
+
+    results: dict[str, dict] = {}
+    for item in batch["items"]:
+        if item["status"] == "reviewed":
+            review = client.get(f"/reviews/{item['application_id']}")
+            review.raise_for_status()
+            results[item["reference"]] = review.json()
+        else:
+            results[item["reference"]] = {"error": item["error_message"] or item["status"]}
+    return results
 
 
 def evaluate_case(case: dict, actual: dict) -> dict:
@@ -154,6 +216,7 @@ def main() -> None:
     parser.add_argument("--only", nargs="+", metavar="CASE_ID", help="Only run these case ids.")
     parser.add_argument("--tag", help="Only run cases with this tag.")
     parser.add_argument("--timeout", type=float, default=90.0, help="Per-request timeout in seconds (default: %(default)s)")
+    parser.add_argument("--batch", action="store_true", help="Submit all cases as one batch through the batch API.")
     args = parser.parse_args()
 
     cases = _load_manifest()
@@ -172,7 +235,27 @@ def main() -> None:
 
     results = []
     with httpx.Client(base_url=args.base_url, timeout=args.timeout) as client:
-        for i, case in enumerate(cases, 1):
+        if args.batch:
+            try:
+                batch_results = run_as_batch(client, cases)
+            except httpx.ConnectError as exc:
+                raise SystemExit(f"\nCould not reach the backend at {args.base_url}. Is it running?\n({exc})") from exc
+            for case in cases:
+                actual = batch_results[case["id"]]
+                if "error" in actual:
+                    results.append(
+                        {
+                            "id": case["id"],
+                            "description": case["description"],
+                            "tags": case["tags"],
+                            "distortion": case["distortion"],
+                            "passed": False,
+                            "error": actual["error"],
+                        }
+                    )
+                else:
+                    results.append(evaluate_case(case, actual))
+        for i, case in enumerate([] if args.batch else cases, 1):
             print(f"({i}/{len(cases)}) {case['id']} ...", end=" ", flush=True)
             started = time.monotonic()
             try:

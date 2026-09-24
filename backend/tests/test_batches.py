@@ -179,3 +179,28 @@ def test_batch_images_wait_behind_interactive_ones(client):
         assert client.calls["order"][1] == (255, 200)
     finally:
         extraction_service._ollama_gate = None
+
+
+def test_more_waiting_reviews_than_database_connections_does_not_deadlock(client, monkeypatch):
+    # Regression: every review waiting on its extraction used to hold a
+    # pooled database connection for the whole wait. With more rows waiting
+    # than the pool has connections (5 + 10 overflow), the next checkout
+    # blocked the event loop — which the waiting reviews needed to finish.
+    import asyncio
+
+    from app import extraction_service
+    from app.db import engine
+    from tests.conftest import FRONT_FIELDS
+
+    async def slow_read(image):
+        await asyncio.sleep(0.2)  # slow enough that reviews pile up waiting
+        return FRONT_FIELDS, 200
+
+    monkeypatch.setattr(extraction_service, "extract_label_fields", slow_read)
+    rows = [_row(n, back_image=None) for n in range(1, 25)]
+    assert len(rows) > engine.pool.size() + engine.pool._max_overflow
+    batch = _create(client, rows)
+    for n, item in enumerate(batch["items"], start=1):
+        assert _attach(client, batch["id"], item["id"], _front(n)).status_code == 200
+    batch = _wait_until_settled(client, batch["id"], timeout=20)
+    assert batch["counts"]["clear"] + batch["counts"]["flagged"] == 24
