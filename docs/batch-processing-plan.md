@@ -1,6 +1,6 @@
 # Batch processing plan
 
-Status: proposal, not built yet. What exists today is `POST /batches` and `POST /batches/{id}/items`, which review one item per HTTP request. The frontend doesn't use them.
+Status: **phases 1 and 2 are built** — see [What was built](#what-was-built) at the end for where the implementation differs from this plan and what's left.
 
 ## The problem
 
@@ -141,3 +141,17 @@ Before promising 200–300-application turnaround, measure it on the target GPU 
 - What format do importers' submissions actually arrive in? If there's a common export from COLAs Online, intake should read that directly rather than asking agents to build a CSV.
 - Is bulk-accepting pre-screened "clear" labels acceptable to TTB, or must every label get an individual human decision?
 - Should batches be private to the agent who submitted them, or visible to the whole team (e.g. Janet's Seattle office picking up an overflow batch)? This decides whether the prototype needs user identity at all.
+
+## What was built
+
+Phases 1 and 2, as described above: CSV + folder intake, validated in the browser (`frontend/app/batches/intake.ts`, unit-tested); create-then-attach uploads with in-browser downscaling; the server-side runner (`backend/app/batch_service.py`); priority scheduling (`backend/app/priority_gate.py`); resume on restart; retry and cancel; the progress + triage pages; CSV export; and the gauntlet's `--batch` mode.
+
+Differences from the plan:
+
+- **The old `POST /batches/{id}/items` endpoint was removed**, not kept. It would have been a second path for creating batch items, with its own review semantics, and nothing used it. Scripts use the same create → upload → attach flow as the UI (see `run_as_batch` in `testing/run_gauntlet.py`).
+- **No pagination on `GET /batches/{id}`.** 300 compact rows is ~100 KB, and one response keeps the triage view simple. It becomes necessary around the 1,000-row cap.
+- **Priority is set when an image is uploaded.** If an agent uploads an image that's already queued as part of a batch, the reading is reused but keeps its batch priority.
+
+Found and fixed while building it: every review waiting on its extraction held a pooled database connection for the whole wait. A batch with more rows waiting than the pool has connections (15) deadlocked the backend, because the next connection checkout blocked the event loop the waiting reviews needed. `wait_for_extraction` now releases its connection before waiting, and `test_more_waiting_reviews_than_database_connections_does_not_deadlock` covers it.
+
+Not built (phase 3): ZIP intake, PDF-per-application intake, bulk accept (pending the policy question), keyboard shortcuts.

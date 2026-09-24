@@ -38,6 +38,17 @@ The extraction step and the compliance-decision step are deliberately separate. 
 - **Fuzzy match** — brand name, class/type, and name/address, which are compared case- and punctuation-insensitively (so "STONE'S THROW" and "Stone's Throw" correctly match) and flagged rather than hard-failed when they're close-but-not-identical.
 - **Placement** — on wine, brand name and class/type found only on the back label are flagged (27 CFR 4.32(a)).
 
+### Batch review
+
+For the peak-season case of an importer submitting 200–300 applications at once, **Review a batch** takes a folder of label photos plus a spreadsheet with one row per application. A template can be downloaded from the batch page; only `front_image` is required. A folder of photos alone also works: each label is then checked on its own, with `NAME_front` / `NAME_back` photos paired automatically.
+
+- **Every problem is found before anything uploads.** Missing or misspelled filenames come with a "did you mean", along with bad beverage classes, unreadable ABV values, and duplicate rows. The agent fixes them and re-drops, or starts the rest.
+- **The batch runs on the server.** Photos are shrunk in the browser and uploaded one application at a time, and each starts being read as soon as it arrives. After the upload the agent can close the page. The batch survives a backend restart, and re-dropping the same folder resumes an interrupted upload.
+- **Single reviews always go first.** Model calls go through a priority gate, so an agent reviewing one label at their desk waits only for the batch images already being read, not the whole queue. Measured on the dev machine: 11.5 s for an interactive label with ~80 s of batch work queued ahead of it.
+- **Triage, not a spreadsheet.** Results list "Needs your review" first, then "Couldn't be read", then the rest. Each opens in the same side-by-side view as a single review, with Accept / Reject / Needs follow-up and Next/Previous. The whole batch exports as CSV, decisions included.
+
+The design, and what's deliberately left for later, is in [docs/batch-processing-plan.md](docs/batch-processing-plan.md).
+
 **Every declared field is optional.** Class/type, ABV and net contents aren't even on the real TTB F 5100.31 form. Asking an agent to type them in from the label, then checking the label against what they typed, would be circular. A field left blank is checked on the label alone: is a required field printed at all, is the container a standard size, is the warning exact. Only beverage class and import status are required, because they decide which rules apply.
 
 Fields that are only required in certain cases — country of origin (imports only), appellation and sulfite declaration (wine only), alcohol content (optional for malt beverages depending on state law) — are handled per beverage class rather than with one blanket rule.
@@ -111,7 +122,20 @@ cd backend
 uv run pytest
 ```
 
-These cover the matching engine's rule logic, net-contents parsing, front/back merging, image normalization, and the upload → review API flow (with the vision model stubbed out). The rule tests are (exact/tolerance/enum/fuzzy behavior, including the specific examples from the requirements gathering — e.g. that a case/punctuation difference in a brand name should match, and that a title-cased "Government Warning" should not). They don't require Ollama to be running. The extraction pipeline itself was validated end-to-end against the real model on a rendered test label: submitting matching field values returns `overall_status: "clear"` with every field marked as a match, and submitting deliberately wrong values (an out-of-tolerance ABV, an altered brand name) correctly returns `overall_status: "flagged"`, with the ABV mismatch explained in terms of the regulatory tolerance and the altered brand name correctly landing in the fuzzy "close but not identical" tier rather than a hard pass or fail.
+Backend tests don't need Ollama; the vision model is stubbed out. They cover:
+- the matching rules, including the examples from the stakeholder interviews: "STONE'S THROW" matches "Stone's Throw", and a title-case "Government Warning" does not pass;
+- net-contents parsing, front/back merging, and image normalization;
+- the upload → review API flow and the batch lifecycle (create, attach, background review, retry, cancel, resume after restart, export);
+- the priority gate, and a regression test for a connection-pool deadlock under large batches.
+
+```bash
+cd frontend
+npm test
+```
+
+Frontend tests cover batch intake: CSV parsing (quoted fields, Excel's byte-order mark), filename matching with "did you mean" suggestions, and pairing front/back photos when there's no spreadsheet.
+
+The end-to-end check against the real model is the test gauntlet in [`testing/`](testing/README.md): 43 rendered labels with known-correct verdicts, run as single reviews or, with `--batch`, as one batch.
 
 ## Deployment
 
@@ -144,9 +168,12 @@ Internet ──▶ reverse proxy (subdomain, HTTPS)
 | `POST /reviews` | Review a label: `front_extraction_id` (+ optional `back_extraction_id`) from the calls above, or the image files directly, plus the declared application fields. Waits for extraction if still running, then returns the full result. |
 | `GET /reviews/{application_id}` | Re-fetch a stored review result. |
 | `PUT /reviews/{application_id}/decision` | Record the agent's call: `accept` / `reject` / `follow_up`, with an optional note. |
-| `POST /batches` | Create a batch to group several reviews together. |
-| `POST /batches/{batch_id}/items` | Add one label+application to a batch; same fields as `POST /reviews`. |
-| `GET /batches/{batch_id}` | Batch summary — per-item status and results. |
+| `POST /batches` | Create a batch: a name plus one row per application (declared fields + image filenames). Rows start out waiting for their images. |
+| `PUT /batches/{id}/items/{item_id}/images` | Attach a row's uploaded images (extraction ids from `POST /extractions?priority=batch`); the row is queued for review. |
+| `GET /batches/{id}` | Progress: status, counts (clear / needs review / couldn't be read / decided), rough time left, and per-row outcomes. |
+| `GET /batches` | Recent batches. |
+| `POST /batches/{id}/cancel` · `POST /batches/{id}/retry-failed` | Stop a batch (rows already reviewed keep their results) · re-queue rows that couldn't be read. |
+| `GET /batches/{id}/export.csv` | One row per application: per-field verdicts, what needs attention, and the agent's decision. |
 | `POST /applications/extract-pdf` | Read a filled-in TTB F 5100.31 PDF's form fields to pre-fill the form. |
 
 Interactive API docs are available at `/docs` while the backend is running.
@@ -164,6 +191,8 @@ backend/
     matching/engine.py        Field-by-field comparison logic (exact/tolerance/enum/fuzzy/placement)
     routers/                  extractions.py, reviews.py, batches.py, applications.py — the API endpoints
     review_service.py         Orchestrates one end-to-end review; shared by reviews and batches
+    batch_service.py          Batch rows, the background runner that reviews them, progress, CSV export
+    priority_gate.py          Shares the model's capacity, single reviews ahead of batch work
     models.py, schemas.py     SQLAlchemy models / Pydantic request-response shapes
   tests/                       Unit tests (rules, parsing, merging, images) + API flow tests with a stubbed model
 frontend/
@@ -171,13 +200,15 @@ frontend/
     page.tsx                  Upload form
     useLabelUpload.ts         Starts extraction as soon as a photo is picked; tracks its progress
     ReviewResultView.tsx      Results beside the label images, plus the agent's decision
+    batches/                  Batch pages: intake (validated in the browser), upload, progress + triage
+      intake.ts               Spreadsheet parsing and validation — pure, unit-tested with `npm test`
     api.ts, types.ts          Backend client and shared types
 ```
 
 ## Known limitations and trade-offs
 
-- **Batch processing is simple, synchronous, in-request handling, and the UI doesn't expose it yet.** The endpoints handle a handful to a few dozen labels, not a 200–300-application import. [docs/batch-processing-plan.md](docs/batch-processing-plan.md) specifies the full design: CSV + folder intake, server-side runner, priority over interactive reviews, triage UI.
-- **Background extraction runs inside the backend process.** Run uvicorn with a single worker. An extraction interrupted by a restart re-runs automatically when something waits on it.
+- **Batches are limited by the model's speed.** At ~7 s per image on the dev machine, 300 applications with front and back labels is over an hour of reading. A dedicated GPU should be several times faster; `run_gauntlet.py --batch` is the benchmark to run there. Batch intake takes a folder plus a CSV. ZIP files, one-PDF-per-application intake, and bulk "accept everything that passed" aren't built. Bulk accept in particular is a TTB policy question before it's an engineering one.
+- **Background work runs inside the backend process.** Label extraction and batch runners are asyncio tasks, so run uvicorn with a single worker. Anything interrupted by a restart resumes automatically.
 - **The field/rule set is a simplified model of 27 CFR Parts 4, 5, 7, and 16**, not full regulatory fidelity. Commodity-specific disclosures beyond the fields with dedicated rules (color additives, FD&C Yellow No. 5, aspartame, etc.) are surfaced as flagged items for human review rather than individually coded. Spirits' "same field of vision" rule (brand, class/type, ABV) can't be judged from separate photos and isn't checked.
 - **Image handling is limited to rotation and size.** EXIF rotation is corrected and images are downscaled, but there's no deskewing, perspective correction, or glare removal; the pipeline relies on the vision model's robustness for photos taken at odd angles.
 - **Type size, bold type, and contrast** (minimum lettering size, the bold "GOVERNMENT WARNING:", background contrast) can't be verified from a photograph and are treated as manual-review items.

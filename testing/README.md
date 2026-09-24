@@ -69,6 +69,12 @@ python run_gauntlet.py --only warning_title_case
 # fuzzy, tolerance, enum, exact, presence, distortion, combo, known_limitation, ...)
 python run_gauntlet.py --tag distortion
 
+# Submit every case as ONE batch through the batch API (create, upload +
+# attach each row's images, wait for the background runner) and check the
+# same expected verdicts — batch mode gets the same correctness check as
+# single reviews. Also prints throughput.
+python run_gauntlet.py --batch
+
 # Point at a non-default backend, adjust per-request timeout (cold model
 # load can take 20+ seconds; the runner retries up to twice on a transient 502)
 python run_gauntlet.py --base-url http://localhost:8000 --timeout 90
