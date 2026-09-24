@@ -37,6 +37,9 @@ class ImageExtraction(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")  # pending/done/error/cancelled
     extracted_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
+    # "interactive" (an agent is waiting) or "batch"; interactive work always
+    # gets the next free model slot. Kept so a re-run keeps its place.
+    priority: Mapped[str] = mapped_column(String, nullable=False, default="interactive")
     model_used: Mapped[str] = mapped_column(String, nullable=False)
     latency_ms: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -133,21 +136,45 @@ class ReviewDecision(Base):
 
 
 class ReviewBatch(Base):
+    """A set of applications submitted together — e.g. an importer's 200-300
+    labels. Reviewed in the background by app/batch_service.py; the agent
+    doesn't need to keep the page open."""
+
     __tablename__ = "review_batches"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # When the first item's images arrived — the start of review work, used
+    # for the progress estimate.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    items: Mapped[list["BatchItem"]] = relationship(back_populates="batch")
+    items: Mapped[list["BatchItem"]] = relationship(back_populates="batch", order_by="BatchItem.row_number")
 
 
 class BatchItem(Base):
+    """One application within a batch: its declared fields (a row of the
+    uploaded spreadsheet), its label images once uploaded, and — once
+    reviewed — the resulting application record."""
+
     __tablename__ = "batch_items"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    batch_id: Mapped[str] = mapped_column(ForeignKey("review_batches.id"), nullable=False)
-    application_id: Mapped[str] = mapped_column(ForeignKey("applications.id"), nullable=False)
-    status: Mapped[str] = mapped_column(String, default="pending")  # pending/done/error
+    batch_id: Mapped[str] = mapped_column(ForeignKey("review_batches.id"), nullable=False, index=True)
+    row_number: Mapped[int] = mapped_column(nullable=False)
+    reference: Mapped[str | None] = mapped_column(String, nullable=True)
+    declared: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Filenames as given in the spreadsheet/folder, so an interrupted upload
+    # can be resumed by dropping the same folder again.
+    front_image_name: Mapped[str] = mapped_column(String, nullable=False)
+    back_image_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    front_extraction_id: Mapped[str | None] = mapped_column(ForeignKey("image_extractions.id"), nullable=True)
+    back_extraction_id: Mapped[str | None] = mapped_column(ForeignKey("image_extractions.id"), nullable=True)
+    application_id: Mapped[str | None] = mapped_column(ForeignKey("applications.id"), nullable=True)
+    # awaiting_images -> queued -> reviewed | error ; skipped if the batch is cancelled first
+    status: Mapped[str] = mapped_column(String, nullable=False, default="awaiting_images")
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
 
     batch: Mapped[ReviewBatch] = relationship(back_populates="items")
+    application: Mapped[Application | None] = relationship()

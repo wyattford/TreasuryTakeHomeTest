@@ -33,9 +33,9 @@ async def read_upload(file: UploadFile) -> bytes:
     return b"".join(chunks)
 
 
-async def start_extraction_from_upload(db: Session, file: UploadFile) -> ImageExtraction:
+async def start_extraction_from_upload(db: Session, file: UploadFile, *, priority: str = "interactive") -> ImageExtraction:
     try:
-        return await start_extraction(db, await read_upload(file))
+        return await start_extraction(db, await read_upload(file), priority=priority)
     except InvalidImageError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

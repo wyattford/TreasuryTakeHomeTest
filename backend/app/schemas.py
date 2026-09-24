@@ -180,17 +180,72 @@ class ReviewResult(BaseModel):
     decision: DecisionOut | None = None
 
 
+MAX_BATCH_ROWS = 1000
+
+
+class BatchRowIn(ApplicationIn):
+    """One application in a batch upload: a row of the spreadsheet — the
+    declared fields plus which image files belong to it."""
+
+    reference: str | None = Field(
+        default=None, description="Free text carried through to the export, e.g. the importer's own ID."
+    )
+    front_image: str = Field(min_length=1, description="Front label image filename, as named in the uploaded folder.")
+    back_image: str | None = None
+
+
+class BatchCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    rows: list[BatchRowIn] = Field(min_length=1, max_length=MAX_BATCH_ROWS)
+
+
+class AttachImagesIn(BaseModel):
+    front_extraction_id: str
+    back_extraction_id: str | None = None
+
+
+BatchItemStatus = Literal["awaiting_images", "queued", "reviewed", "error", "skipped"]
+
+
 class BatchItemOut(BaseModel):
-    application_id: str
-    status: str
-    error_message: str | None
-    result: ReviewResult | None = None
-
-
-class BatchSummary(BaseModel):
     id: str
+    row_number: int
+    reference: str | None
+    front_image_name: str
+    back_image_name: str | None
+    status: BatchItemStatus
+    error_message: str | None
+    front_extraction_id: str | None
+    back_extraction_id: str | None
+    application_id: str | None
+    brand_name: str | None  # declared, or else as read off the label
+    overall_status: Literal["clear", "flagged"] | None  # once reviewed
+    attention_count: int  # fields that aren't a plain match
+    decision: DecisionOut | None
+
+
+class BatchCounts(BaseModel):
+    awaiting_images: int = 0
+    queued: int = 0
+    clear: int = 0
+    flagged: int = 0
+    error: int = 0
+    skipped: int = 0
+    decided: int = 0
+
+
+BatchStatus = Literal["uploading", "running", "done", "cancelled"]
+
+
+class BatchSummaryOut(BaseModel):
+    id: str
+    name: str
     created_at: datetime
+    status: BatchStatus
     total: int
-    done: int
-    errored: int
+    counts: BatchCounts
+
+
+class BatchOut(BatchSummaryOut):
+    eta_seconds: int | None  # rough estimate of time left, once some items have been reviewed
     items: list[BatchItemOut]

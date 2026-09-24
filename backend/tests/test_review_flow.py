@@ -2,69 +2,11 @@
 extracting) before the review is submitted. The vision model is stubbed out,
 so these run without Ollama."""
 
-import asyncio
-import io
-
-import pytest
-from fastapi.testclient import TestClient
-from PIL import Image
-
-from app import extraction_service, storage
-from app.db import Base, engine
-from app.inference.ollama_client import OllamaUnavailableError
-from app.main import app
-from app.schemas import ExtractedLabelFields
-
-WARNING = (
-    "GOVERNMENT WARNING: (1) According to the Surgeon General, women should not drink alcoholic beverages during "
-    "pregnancy because of the risk of birth defects. (2) Consumption of alcoholic beverages impairs your ability to "
-    "drive a car or operate machinery, and may cause health problems."
-)
-FRONT_FIELDS = ExtractedLabelFields(
-    brand_name="OLD TOM DISTILLERY",
-    class_type="Kentucky Straight Bourbon Whiskey",
-    abv_percent=45.0,
-    proof=90,
-    net_contents="750 mL",
-)
-BACK_FIELDS = ExtractedLabelFields(name_address="Old Tom Distillery, Louisville, KY", government_warning_text=WARNING)
+from tests.conftest import BACK_PNG, FRONT_PNG, png
 
 
-def _png(color: str) -> bytes:
-    out = io.BytesIO()
-    Image.new("RGB", (60, 40), color).save(out, format="PNG")
-    return out.getvalue()
-
-
-FRONT_PNG = _png("white")
-BACK_PNG = _png("black")
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    Base.metadata.drop_all(engine)
-    Base.metadata.create_all(engine)
-    monkeypatch.setattr(storage, "BACKEND_DIR", tmp_path)
-    monkeypatch.setattr(storage, "UPLOAD_DIR", tmp_path / "uploads")
-    calls = {"count": 0, "fail": False}
-
-    async def fake_extract(image: bytes):
-        calls["count"] += 1
-        await asyncio.sleep(0.05)
-        if calls["fail"]:
-            raise OllamaUnavailableError("Ollama is down")
-        # White image = front label, black = back label.
-        is_front = Image.open(io.BytesIO(image)).getpixel((0, 0))[0] > 128
-        return (FRONT_FIELDS if is_front else BACK_FIELDS), 50
-
-    monkeypatch.setattr(extraction_service, "extract_label_fields", fake_extract)
-    with TestClient(app) as test_client:
-        test_client.calls = calls
-        yield test_client
-
-
-def _upload(client, png: bytes) -> dict:
-    response = client.post("/extractions", files={"image": ("label.png", png, "image/png")})
+def _upload(client, image: bytes) -> dict:
+    response = client.post("/extractions", files={"image": ("label.png", image, "image/png")})
     assert response.status_code == 202, response.text
     return response.json()
 
@@ -116,7 +58,7 @@ def test_review_with_files_still_works(client):
 
 def test_failed_extraction_is_retried_when_review_needs_it(client):
     client.calls["fail"] = True
-    front = _upload(client, _png("white"))
+    front = _upload(client, png("white"))
     assert client.get(f"/extractions/{front['id']}", params={"wait": 5}).json()["status"] == "error"
 
     client.calls["fail"] = False
@@ -126,7 +68,7 @@ def test_failed_extraction_is_retried_when_review_needs_it(client):
 
 def test_review_fails_cleanly_when_model_is_down(client):
     client.calls["fail"] = True
-    response = client.post("/reviews", files={"front": ("f.png", _png("gray"), "image/png")}, data={"beverage_class": "wine"})
+    response = client.post("/reviews", files={"front": ("f.png", png("gray"), "image/png")}, data={"beverage_class": "wine"})
     assert response.status_code == 502
     assert "Ollama is down" in response.json()["detail"]
 

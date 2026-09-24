@@ -1,96 +1,98 @@
-"""Batch review: group several application+label reviews under one batch id
-so the frontend can show a combined summary. Deliberately simple —
-synchronous, in-request processing per item, no job queue. Practical for the
-tens-of-labels case, not a 200-300-at-once import scenario; that gap is a
-documented limitation rather than infrastructure we don't have time to build
-and test properly.
+"""Batch review endpoints. The flow, driven by the frontend's batch page:
+
+1. POST /batches with every row of the spreadsheet (declared fields + image
+   filenames). Rows start out "awaiting_images".
+2. For each row: upload its image(s) with POST /extractions?priority=batch —
+   reading starts right away — then PUT .../items/{id}/images to attach the
+   extraction ids. The row is queued and the batch's background runner
+   reviews it (app/batch_service.py).
+3. Poll GET /batches/{id} for progress; open individual results with
+   GET /reviews/{application_id} and record decisions with
+   PUT /reviews/{application_id}/decision, exactly as for a single review.
 """
 
 from __future__ import annotations
 
-import time
-
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
+from app import batch_service
+from app.batch_service import BatchError
 from app.db import get_db
-from app.models import Application, BatchItem, ReviewBatch
-from app.review_service import ExtractionFailedError, build_review_result, create_application, latest_review_run, run_review
-from app.routers.forms import declared_application_form, resolve_label_image
-from app.schemas import ApplicationIn, BatchItemOut, BatchSummary
+from app.models import BatchItem, ReviewBatch
+from app.schemas import AttachImagesIn, BatchCreateIn, BatchItemOut, BatchOut, BatchSummaryOut
 
 router = APIRouter(prefix="/batches", tags=["batches"])
 
-
-@router.post("", response_model=BatchSummary)
-def create_batch(db: Session = Depends(get_db)) -> BatchSummary:
-    batch = ReviewBatch()
-    db.add(batch)
-    db.commit()
-    return _summarize(db, batch)
+_RECENT_BATCHES = 20
 
 
-@router.post("/{batch_id}/items", response_model=BatchItemOut)
-async def add_batch_item(
-    batch_id: str,
-    front: UploadFile | None = File(None),
-    back: UploadFile | None = File(None),
-    front_extraction_id: str | None = Form(None),
-    back_extraction_id: str | None = Form(None),
-    declared: ApplicationIn = Depends(declared_application_form),
-    db: Session = Depends(get_db),
-) -> BatchItemOut:
+def _get_batch(db: Session, batch_id: str) -> ReviewBatch:
     batch = db.get(ReviewBatch, batch_id)
     if batch is None:
         raise HTTPException(status_code=404, detail="No batch with that id.")
+    return batch
 
-    started = time.monotonic()
-    front_id = await resolve_label_image(db, side="front", file=front, extraction_id=front_extraction_id, required=True)
-    back_id = await resolve_label_image(db, side="back", file=back, extraction_id=back_extraction_id, required=False)
 
-    application = create_application(db, declared, front_extraction_id=front_id, back_extraction_id=back_id)
-    item = BatchItem(batch_id=batch_id, application_id=application.id, status="pending")
-    db.add(item)
-    db.commit()
+@router.post("", response_model=BatchOut, status_code=201)
+def create_batch(body: BatchCreateIn, db: Session = Depends(get_db)) -> BatchOut:
+    """Creates the batch with all of its rows, before any images are sent,
+    so an interrupted upload can be picked up again."""
 
+    return batch_service.batch_out(db, batch_service.create_batch(db, body))
+
+
+@router.get("", response_model=list[BatchSummaryOut])
+def list_batches(db: Session = Depends(get_db)) -> list[BatchSummaryOut]:
+    batches = db.query(ReviewBatch).order_by(ReviewBatch.created_at.desc()).limit(_RECENT_BATCHES)
+    return [batch_service.batch_summary(db, batch) for batch in batches]
+
+
+@router.get("/{batch_id}", response_model=BatchOut)
+def get_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchOut:
+    return batch_service.batch_out(db, _get_batch(db, batch_id))
+
+
+# async so it runs on the event loop alongside the batch runner — see
+# batch_service.ensure_runner for why that ordering matters.
+@router.put("/{batch_id}/items/{item_id}/images", response_model=BatchItemOut)
+async def attach_images(batch_id: str, item_id: str, body: AttachImagesIn, db: Session = Depends(get_db)) -> BatchItemOut:
+    batch = _get_batch(db, batch_id)
+    item = db.get(BatchItem, item_id)
+    if item is None or item.batch_id != batch_id:
+        raise HTTPException(status_code=404, detail="No row with that id in this batch.")
     try:
-        result = await run_review(db, application, started=started)
-        item.status = "done"
-        db.commit()
-        return BatchItemOut(application_id=application.id, status="done", error_message=None, result=result)
-    except ExtractionFailedError as exc:
-        item.status = "error"
-        item.error_message = str(exc)
-        db.commit()
-        return BatchItemOut(application_id=application.id, status="error", error_message=str(exc), result=None)
+        batch_service.attach_images(db, batch, item, body.front_extraction_id, body.back_extraction_id)
+    except BatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return next(i for i in batch_service.batch_items(db, batch) if i.id == item_id)
 
 
-@router.get("/{batch_id}", response_model=BatchSummary)
-def get_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchSummary:
-    batch = db.get(ReviewBatch, batch_id)
-    if batch is None:
-        raise HTTPException(status_code=404, detail="No batch with that id.")
-    return _summarize(db, batch)
+# async: cancelling asyncio tasks must happen on the event loop's thread,
+# not in the worker thread FastAPI runs plain `def` endpoints in.
+@router.post("/{batch_id}/cancel", response_model=BatchOut)
+async def cancel_batch(batch_id: str, db: Session = Depends(get_db)) -> BatchOut:
+    batch = _get_batch(db, batch_id)
+    batch_service.cancel_batch(db, batch)
+    return batch_service.batch_out(db, batch)
 
 
-def _summarize(db: Session, batch: ReviewBatch) -> BatchSummary:
-    items: list[BatchItemOut] = []
-    for item in batch.items:
-        result = None
-        if item.status == "done":
-            application = db.get(Application, item.application_id)
-            run = latest_review_run(db, item.application_id)
-            if application is not None and run is not None:
-                result = build_review_result(application, run)
-        items.append(
-            BatchItemOut(application_id=item.application_id, status=item.status, error_message=item.error_message, result=result)
-        )
+@router.post("/{batch_id}/retry-failed", response_model=BatchOut)
+async def retry_failed(batch_id: str, db: Session = Depends(get_db)) -> BatchOut:
+    batch = _get_batch(db, batch_id)
+    try:
+        batch_service.retry_failed(db, batch)
+    except BatchError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return batch_service.batch_out(db, batch)
 
-    return BatchSummary(
-        id=batch.id,
-        created_at=batch.created_at,
-        total=len(items),
-        done=sum(1 for i in items if i.status == "done"),
-        errored=sum(1 for i in items if i.status == "error"),
-        items=items,
+
+@router.get("/{batch_id}/export.csv")
+def export_batch(batch_id: str, db: Session = Depends(get_db)) -> Response:
+    batch = _get_batch(db, batch_id)
+    filename = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in batch.name)[:60] or "batch"
+    return Response(
+        content=batch_service.export_csv(db, batch),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}-results.csv"'},
     )

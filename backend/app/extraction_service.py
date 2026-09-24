@@ -26,6 +26,7 @@ from app.db import SessionLocal
 from app.images import NORMALIZED_CONTENT_TYPE, normalize_label_image
 from app.inference.ollama_client import EXTRACTION_SYSTEM_PROMPT, OllamaUnavailableError, extract_label_fields
 from app.models import ImageExtraction
+from app.priority_gate import BATCH, INTERACTIVE, PriorityGate
 from app.storage import image_path, save_image
 
 PENDING = "pending"
@@ -33,26 +34,31 @@ DONE = "done"
 ERROR = "error"
 CANCELLED = "cancelled"
 
+PRIORITIES = {"interactive": INTERACTIVE, "batch": BATCH}
+
 _tasks: dict[str, asyncio.Task] = {}
-_ollama_slots: asyncio.Semaphore | None = None
+_ollama_gate: PriorityGate | None = None
 
 
 class ExtractionNotFoundError(LookupError):
     pass
 
 
-def _slots() -> asyncio.Semaphore:
+def _gate() -> PriorityGate:
     # Created lazily so it binds to the running event loop.
-    global _ollama_slots
-    if _ollama_slots is None:
-        _ollama_slots = asyncio.Semaphore(settings.ollama_max_concurrency)
-    return _ollama_slots
+    global _ollama_gate
+    if _ollama_gate is None:
+        _ollama_gate = PriorityGate(settings.ollama_max_concurrency)
+    return _ollama_gate
 
 
-async def start_extraction(db: Session, raw_image: bytes) -> ImageExtraction:
+async def start_extraction(db: Session, raw_image: bytes, *, priority: str = "interactive") -> ImageExtraction:
     """Normalizes and stores the image, then starts extracting it in the
     background. Returns immediately. Raises InvalidImageError for a file that
     isn't a readable image.
+
+    ``priority`` is "interactive" (an agent is waiting on this image) or
+    "batch"; interactive extractions always get the next free model slot.
 
     Re-uploading an identical image reuses the earlier result (or the
     extraction already in flight) instead of running the model again."""
@@ -75,11 +81,12 @@ async def start_extraction(db: Session, raw_image: bytes) -> ImageExtraction:
         content_type=NORMALIZED_CONTENT_TYPE,
         cache_key=cache_key,
         status=PENDING,
+        priority=priority,
         model_used=settings.ollama_model,
     )
     db.add(record)
     db.commit()
-    _schedule(record.id, image)
+    _schedule(record.id, image, record.priority)
     return record
 
 
@@ -104,7 +111,7 @@ async def wait_for_extraction(
         record.status = PENDING
         record.error_message = None
         db.commit()
-        _schedule(extraction_id, image_path(record.file_path).read_bytes())
+        _schedule(extraction_id, image_path(record.file_path).read_bytes(), record.priority)
 
     task = _tasks.get(extraction_id)
     if task is not None:
@@ -133,18 +140,18 @@ def _cache_key(image: bytes) -> str:
     return digest.hexdigest()
 
 
-def _schedule(extraction_id: str, image: bytes) -> None:
-    task = asyncio.create_task(_run(extraction_id, image))
+def _schedule(extraction_id: str, image: bytes, priority: str) -> None:
+    task = asyncio.create_task(_run(extraction_id, image, PRIORITIES[priority]))
     _tasks[extraction_id] = task
     task.add_done_callback(lambda _: _tasks.pop(extraction_id, None))
 
 
-async def _run(extraction_id: str, image: bytes) -> None:
+async def _run(extraction_id: str, image: bytes, priority: int) -> None:
     fields = None
     latency_ms = None
     error = None
     try:
-        async with _slots():
+        async with _gate().slot(priority):
             fields, latency_ms = await extract_label_fields(image)
         status = DONE
     except OllamaUnavailableError as exc:

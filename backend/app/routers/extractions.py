@@ -8,6 +8,8 @@ fields, so the review itself is near-instant.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -25,12 +27,18 @@ MAX_WAIT_SECONDS = 30
 
 
 @router.post("", response_model=ExtractionOut, status_code=202)
-async def create_extraction(image: UploadFile = File(...), db: Session = Depends(get_db)) -> ExtractionOut:
+async def create_extraction(
+    image: UploadFile = File(...),
+    priority: Literal["interactive", "batch"] = Query(
+        "interactive", description='"batch" for batch uploads, so they never hold up an agent\'s single review.'
+    ),
+    db: Session = Depends(get_db),
+) -> ExtractionOut:
     """Stores the image and starts reading it in the background. Returns
     right away with status "pending" (or "done", if this exact image was
     already read before)."""
 
-    return ExtractionOut.model_validate(await start_extraction_from_upload(db, image))
+    return ExtractionOut.model_validate(await start_extraction_from_upload(db, image, priority=priority))
 
 
 @router.get("/{extraction_id}", response_model=ExtractionOut)
@@ -49,8 +57,10 @@ async def get_extraction(
     return ExtractionOut.model_validate(record)
 
 
+# async: cancelling an asyncio task must happen on the event loop's thread,
+# not in the worker thread FastAPI runs plain `def` endpoints in.
 @router.delete("/{extraction_id}", status_code=204)
-def delete_extraction(extraction_id: str) -> Response:
+async def delete_extraction(extraction_id: str) -> Response:
     """Stops an in-flight extraction the user no longer needs (they picked a
     different photo), freeing the model for the one they do."""
 

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.batch_service import resume_batches
 from app.config import settings
 from app.db import init_db
 from app.inference.ollama_client import warm_up
@@ -13,6 +14,7 @@ from app.routers import applications, batches, extractions, reviews
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    resume_batches()
     # Fire-and-forget: startup shouldn't block on the model loading.
     warmup = asyncio.create_task(warm_up()) if settings.ollama_warmup_on_startup else None
     yield
