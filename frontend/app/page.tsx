@@ -154,7 +154,7 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-4xl px-4 py-10">
-      <h1 className="text-2xl font-semibold text-gray-900">TTB Label Review</h1>
+      <h1 className="text-2xl font-semibold text-gray-900">Review one label</h1>
       <p className="mt-1 text-gray-600">
         Add the label photo first — it starts being read right away. Then fill in whatever the
         application (TTB F 5100.31) declares, and press Review.

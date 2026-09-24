@@ -50,7 +50,19 @@ const DECISION_LABELS: Record<Decision, string> = {
   follow_up: "Marked for follow-up",
 };
 
-export function ReviewResultView({ result, onNext }: { result: ReviewResult; onNext: () => void }) {
+export function ReviewResultView({
+  result,
+  onNext,
+  nextLabel = "Review next label →",
+  inBatch = false,
+}: {
+  result: ReviewResult;
+  onNext: () => void;
+  nextLabel?: string;
+  // In a batch, nobody pressed Review and waited — the timing line would be
+  // meaningless (it includes the time spent queued behind other labels).
+  inBatch?: boolean;
+}) {
   const images = [
     { id: result.front_extraction_id, label: "Front label" },
     ...(result.back_extraction_id ? [{ id: result.back_extraction_id, label: "Back label" }] : []),
@@ -71,7 +83,9 @@ export function ReviewResultView({ result, onNext }: { result: ReviewResult; onN
         </span>
       </div>
       <p className="mt-1 text-sm text-gray-500">
-        Ready {waitedSeconds}s after you pressed Review · the label took {readSeconds}s to read · {result.model_used}
+        {inBatch
+          ? `Read by ${result.model_used}`
+          : `Ready ${waitedSeconds}s after you pressed Review · the label took ${readSeconds}s to read · ${result.model_used}`}
       </p>
 
       <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-[240px_1fr]">
@@ -124,7 +138,12 @@ export function ReviewResultView({ result, onNext }: { result: ReviewResult; onN
         </div>
       </div>
 
-      <DecisionPanel applicationId={result.application.id} initial={result.decision} onNext={onNext} />
+      <DecisionPanel
+        applicationId={result.application.id}
+        initial={result.decision}
+        onNext={onNext}
+        nextLabel={nextLabel}
+      />
     </section>
   );
 }
@@ -133,10 +152,12 @@ function DecisionPanel({
   applicationId,
   initial,
   onNext,
+  nextLabel,
 }: {
   applicationId: string;
   initial: DecisionOut | null;
   onNext: () => void;
+  nextLabel: string;
 }) {
   const [saved, setSaved] = useState<DecisionOut | null>(initial);
   const [note, setNote] = useState(initial?.note ?? "");
@@ -189,7 +210,7 @@ function DecisionPanel({
             onClick={onNext}
             className="rounded-md bg-gray-900 px-4 py-3 text-base font-medium text-white hover:bg-gray-800"
           >
-            Review next label →
+            {nextLabel}
           </button>
         </div>
       )}

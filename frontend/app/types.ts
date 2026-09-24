@@ -91,3 +91,47 @@ export interface ReviewResult {
 export interface ApiError {
   error: string;
 }
+
+export type BatchItemStatus = "awaiting_images" | "queued" | "reviewed" | "error" | "skipped";
+export type BatchStatus = "uploading" | "running" | "done" | "cancelled";
+
+export interface BatchItemOut {
+  id: string;
+  row_number: number;
+  reference: string | null;
+  front_image_name: string;
+  back_image_name: string | null;
+  status: BatchItemStatus;
+  error_message: string | null;
+  front_extraction_id: string | null;
+  back_extraction_id: string | null;
+  application_id: string | null;
+  brand_name: string | null;
+  overall_status: "clear" | "flagged" | null;
+  attention_count: number;
+  decision: DecisionOut | null;
+}
+
+export interface BatchCounts {
+  awaiting_images: number;
+  queued: number;
+  clear: number;
+  flagged: number;
+  error: number;
+  skipped: number;
+  decided: number;
+}
+
+export interface BatchSummaryOut {
+  id: string;
+  name: string;
+  created_at: string;
+  status: BatchStatus;
+  total: number;
+  counts: BatchCounts;
+}
+
+export interface BatchOut extends BatchSummaryOut {
+  eta_seconds: number | null;
+  items: BatchItemOut[];
+}

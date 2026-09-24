@@ -1,4 +1,14 @@
-import type { Decision, DecisionOut, ExtractedApplicationFields, ExtractionOut, ReviewResult } from "./types";
+import type { PlannedRow } from "./batches/intake";
+import type {
+  BatchItemOut,
+  BatchOut,
+  BatchSummaryOut,
+  Decision,
+  DecisionOut,
+  ExtractedApplicationFields,
+  ExtractionOut,
+  ReviewResult,
+} from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
@@ -56,11 +66,16 @@ export function labelImageUrl(extractionId: string): string {
   return `${API_BASE}/extractions/${extractionId}/image`;
 }
 
-/** Uploads a label image; the backend starts reading it immediately. */
-export async function startExtraction(image: File): Promise<ExtractionOut> {
+/** Uploads a label image; the backend starts reading it immediately.
+ * Batch uploads pass priority "batch" so they never hold up an agent's
+ * single review. */
+export async function startExtraction(
+  image: File,
+  priority: "interactive" | "batch" = "interactive",
+): Promise<ExtractionOut> {
   const form = new FormData();
   form.append("image", image);
-  const res = await fetch(`${API_BASE}/extractions`, { method: "POST", body: form });
+  const res = await fetch(`${API_BASE}/extractions?priority=${priority}`, { method: "POST", body: form });
   await throwIfNotOk(res, `Upload failed (${res.status}).`);
   return (await res.json()) as ExtractionOut;
 }
@@ -115,4 +130,65 @@ export async function extractApplicationPdf(file: File): Promise<ExtractedApplic
   await throwIfNotOk(res, `PDF extraction failed (${res.status}).`);
 
   return (await res.json()) as ExtractedApplicationFields;
+}
+
+export async function getReview(applicationId: string): Promise<ReviewResult> {
+  const res = await fetch(`${API_BASE}/reviews/${applicationId}`);
+  await throwIfNotOk(res, `Loading the review failed (${res.status}).`);
+  return (await res.json()) as ReviewResult;
+}
+
+async function sendJson<T>(method: string, path: string, body: unknown, fallback: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  await throwIfNotOk(res, `${fallback} (${res.status}).`);
+  return (await res.json()) as T;
+}
+
+export function createBatch(name: string, rows: PlannedRow[]): Promise<BatchOut> {
+  // `line` is only for showing the agent where a problem is; undefined
+  // keys are dropped by JSON.stringify, so it isn't sent.
+  const payload = rows.map((row) => ({ ...row, line: undefined }));
+  return sendJson("POST", "/batches", { name, rows: payload }, "Creating the batch failed");
+}
+
+export function attachBatchImages(
+  batchId: string,
+  itemId: string,
+  frontExtractionId: string,
+  backExtractionId: string | null,
+): Promise<BatchItemOut> {
+  return sendJson(
+    "PUT",
+    `/batches/${batchId}/items/${itemId}/images`,
+    { front_extraction_id: frontExtractionId, back_extraction_id: backExtractionId },
+    "Attaching the photos failed",
+  );
+}
+
+export async function getBatch(batchId: string): Promise<BatchOut> {
+  const res = await fetch(`${API_BASE}/batches/${batchId}`);
+  await throwIfNotOk(res, `Loading the batch failed (${res.status}).`);
+  return (await res.json()) as BatchOut;
+}
+
+export async function listBatches(): Promise<BatchSummaryOut[]> {
+  const res = await fetch(`${API_BASE}/batches`);
+  await throwIfNotOk(res, `Loading recent batches failed (${res.status}).`);
+  return (await res.json()) as BatchSummaryOut[];
+}
+
+export function cancelBatch(batchId: string): Promise<BatchOut> {
+  return sendJson("POST", `/batches/${batchId}/cancel`, undefined, "Cancelling the batch failed");
+}
+
+export function retryFailedBatchItems(batchId: string): Promise<BatchOut> {
+  return sendJson("POST", `/batches/${batchId}/retry-failed`, undefined, "Retrying failed");
+}
+
+export function batchExportUrl(batchId: string): string {
+  return `${API_BASE}/batches/${batchId}/export.csv`;
 }
