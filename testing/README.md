@@ -111,69 +111,37 @@ Both fixes are covered by new regression tests in
 `test_net_contents_declared_in_unparseable_unit_is_flagged_not_matched`), and
 `backend/tests/` passes in full (11/11) after the change.
 
-## Findings from the last full run (36/43 passed)
+## Findings
 
-With the matching-engine bugs fixed, `net_contents_unparseable_declared_unit`
-now passes for the right reason. Fixing the ABV bug also **unmasked** a
-separate, previously-hidden issue: `ipa_clean_correct` used to pass only
-because the old engine bug and a model quirk happened to produce the same
-"flagged" result by coincidence — with the engine bug gone, the real model
-behavior underneath it is now visible as its own failure (item 5 below).
+### First full run (36/43 passed)
 
-Running the gauntlet against `qwen2.5vl` surfaced five reproducible gaps —
-reproducible meaning they happen consistently on a specific label, including
-on **clean, undistorted** images, so they're model/prompt behavior, not
-image-quality noise or a fixture bug:
+With the matching-engine bugs fixed, the first full run against `qwen2.5vl` (one extraction call over both images, JSON Schema in the prompt) surfaced five reproducible model/prompt gaps. They happened on **clean, undistorted** images, so they weren't image-quality noise:
 
-1. **The model silently "corrects" the Government Warning's capitalization.**
-   `warning_title_case` renders "Government Warning" in title case (a real
-   27 CFR 16.21 violation), but the model transcribes it back as
-   "GOVERNMENT WARNING" in its response — passing the exact-match check that
-   exists specifically to catch this. The model appears to normalize
-   well-known boilerplate to its canonical form rather than transcribing
-   verbatim capitalization, which defeats the one field the app treats as
-   legally exact.
+1. **The model "corrected" the Government Warning's capitalization.** `warning_title_case` renders "Government Warning" in title case, a real 27 CFR 16.21 violation, but the model transcribed it as "GOVERNMENT WARNING".
+2. **Country of origin was taken from a US address on imports.** With the "Product of Sweden" line removed, the model returned the importer's "New York, NY".
+3. **`class_type` absorbed adjacent appellation text** ("Chianti Classico DOCG" instead of "Chianti Classico").
+4. **Correctly read fields were also marked illegible**, flagging a fully compliant label.
+5. **An absent field was marked illegible** instead of just null (ABV on a malt beverage that legitimately omits it).
 
-2. **Country of origin can be hallucinated from a US address on imports.**
-   `country_of_origin_missing_on_import` removes the "Product of Sweden"
-   line entirely, but the model returns `"New York, NY"` — the importer's US
-   city/state from the name/address block — as if it were the country of
-   origin. The system prompt tells the model to leave `country_of_origin`
-   null for domestic products even if a US location is mentioned, but
-   doesn't cover this case: an import with no actual origin statement.
+### After switching to upload-time, per-image extraction (29/43, then 43/43)
 
-3. **`class_type` sometimes absorbs adjacent appellation text.** Both
-   `chianti_clean_correct` (no distortion) and `noise_correct` come back with
-   `class_type` read as `"Chianti Classico DOCG"` instead of `"Chianti
-   Classico"` — "DOCG" is part of the separate appellation line
-   ("Chianti Classico DOCG") elsewhere on the back label. The model conflates
-   two visually similar, nearby text blocks into one field.
+Extraction now runs once per image, starting when the image is uploaded (see the main README). The first run in that mode regressed to **29/43**. A label image read on its own lacks the context of the other side:
 
-4. **Some labels come back with nearly every field marked illegible despite
-   being read correctly.** `lager_clean_correct` and `glare_correct` (same
-   underlying label) both get `class_type`, `net_contents`, `name_address`,
-   `government_warning_text`, etc. flagged as `illegible_fields` — yet the
-   same response's actual extracted values for those fields are correct
-   verbatim transcriptions. Confirmed with a raw diagnostic call
-   (`extract_label_fields` directly, and a plain free-form transcription
-   prompt) — the label is genuinely legible and a simpler prompt reads it
-   perfectly; something about this label's structure under the schema-guided
-   extraction prompt makes the model self-report low confidence anyway. This
-   produces a false "flagged" review burden on a fully compliant label.
+- **Name and address split in two (6 cases).** The back label's bottler statement wraps across lines; read alone, its first line ("Northwind Distillers") was taken as a brand name and dropped from the address.
+- **An invented Government Warning (2 cases).** A front label with no warning came back with a made-up statement ("CONSUMPTION OF THIS PRODUCT IS DANGEROUSLY ABUSIVE…"). With no real warning on the back to override it, a missing warning looked like a wording mismatch.
+- **Brand repeated as name and address.** The bourbon front label's reading put "OLD TOM DISTILLERY" in `name_address`, which beat the back label's real statement.
 
-5. **An absent field is sometimes marked "illegible" instead of just null.**
-   `ipa_clean_correct`'s label genuinely has no ABV printed anywhere (it's a
-   malt beverage, where that's allowed) — the model correctly extracts
-   `abv_percent: null`, but *also* adds `"abv_percent"` to `illegible_fields`.
-   `illegible_fields` is documented in the extraction prompt as "present but
-   unreadable," not "absent," so this over-flagging routes a fully compliant
-   label to human review for no reason. Likely the same underlying tendency
-   as finding 4 — the model hedging into "flag it" even when it already has
-   a confident, correct answer.
+Fixes, all measured on this gauntlet:
 
-None of these are fixture bugs — expected verdicts for all five are computed
-by the same `compare()` function the app itself uses (now with both matching
-engine bugs above fixed), and the underlying label images were manually
-reviewed and are cleanly legible. They're reported here rather than fixed,
-since fixing them means iterating on the extraction prompt/model, which is a
-separate piece of work from the test harness itself.
+- **Prompt field descriptions.** `name_address` asks for the complete statement including the company name it starts with. `brand_name` must not come from that statement. `government_warning_text` should be null unless a warning paragraph is actually printed ("most front labels have none"). The old description said the warning "starts with 'GOVERNMENT WARNING:'". Removing that also fixed finding 1: the model had been matching the example's capitalization rather than transcribing.
+- **The schema is described as a compact field list** instead of a JSON Schema dump (about 1,400 → 700 prompt tokens).
+- **Merging prefers the back label** for the warning and the name/address statement, the two statements that normally live there. Among other things, an invented but perfectly worded "warning" read off a front label can then never hide a real violation printed on the back.
+- **The illegible list no longer raises flags on its own** (findings 4 and 5). It only adds a "may be printed but unreadable — check by eye" note to a field that's already reported missing.
+
+Result: **43/43**. Findings 2 and 3 didn't reproduce in this mode. Each image's prompt no longer mentions the product's import status, and appellation and class/type usually sit on different sides of the label. That's a property of these fixtures, not a guarantee.
+
+### Latency
+
+On an M4 Pro, with images capped at 1024 px on the long edge and Ollama running one request at a time, the uncached gauntlet cases took a **median 12.1 s** (range 4–16 s) to read both images. The gauntlet submits the images *with* the review, so this is the worst case, with no head start. In the UI, each image starts being read the moment it's picked, typically ~6–9 s per image, so the wait after pressing Review is whatever reading time is left once the agent has filled in the form. Downscaling from 1300 to 1024 px cut per-image input processing from ~8.0 s to ~4.7 s.
+
+Cases that reuse an already-read label image with different declared values finish in ~30 ms: extraction results are reused by content hash, so only the matching step runs.
