@@ -1,36 +1,36 @@
-# Batch processing plan
+# Batch review: design
 
-Status: **phases 1 and 2 are built** — see [What was built](#what-was-built) at the end for where the implementation differs from this plan and what's left.
+This document records the design of batch review and how the built version differs from it. Phases 1 and 2 below are built; [What was built](#what-was-built) lists the differences and what remains.
 
 ## The problem
 
 > "During peak season, we get these big importers who dump 200, 300 label applications on us at once. Right now we literally have to process them one at a time." — Sarah Chen
 
-Some numbers set the shape of the solution. On the dev machine (M4 Pro, qwen2.5vl 7B, 1024 px images), one label image takes about 9 s of model time. A 300-application batch with front and back labels is 600 images, or about 90 minutes of GPU time. A dedicated GPU should be several times faster, but that needs measuring (see [Measuring throughput](#measuring-throughput)). Either way:
+A 300-application batch with front and back labels is 600 images. With the self-hosted model on development hardware (Qwen2.5-VL 7B on an Apple M4 Pro), one image took about 9 s, or roughly 90 minutes for the batch. On Amazon Bedrock (Llama 4 Maverick, four calls in parallel) the same batch takes about 4 minutes. Either way, four requirements follow:
 
-- **Batches have to run on the server without anyone watching.** An agent submits, goes back to other work, and comes back. The browser tab must not need to stay open.
-- **Batches must not block interactive reviews.** An agent reviewing a single label at the desk must not wait behind 600 queued batch images.
-- **Uploads have to be incremental.** 600 full-size phone photos can be 3+ GB. A single request that large would hit the reverse proxy's body-size limit and the backend's per-file limit, and one network hiccup would lose the whole upload.
-- **Bad input has to be caught before the model runs.** Finding out at item 173 that a filename in the spreadsheet was misspelled is the failure mode to design out.
+- **Batches run on the server without anyone watching.** An agent submits, returns to other work, and comes back; the browser tab does not need to stay open.
+- **Batches must not block interactive reviews.** An agent reviewing a single label must not wait behind 600 queued batch images.
+- **Uploads are incremental.** 600 full-size phone photos can exceed 3 GB. A single request that large would exceed proxy and per-file limits, and one network interruption would lose the whole upload.
+- **Bad input is caught before the model runs.** Discovering at item 173 that a spreadsheet filename is misspelled is the failure the design exists to prevent.
 
 ## Design overview
 
-The single-label flow already has the building blocks: upload-time extraction (`POST /extractions`), result reuse by content hash, and extractions that survive restarts. Batch processing is mostly that flow at scale, plus a server-side runner.
+The single-label flow already provides the building blocks: reading starts at upload (`POST /extractions`), readings are reused by content hash, and readings survive restarts. Batch review is that flow at scale, plus a server-side runner.
 
 ```
-Browser                                   Backend                               Ollama
-───────                                   ───────                               ──────
-1. Agent drops a folder / ZIP of
-   images + manifest.csv
+Browser                                   Backend                               Model
+───────                                   ───────                               ─────
+1. Agent drops a folder of
+   images + a CSV manifest
 2. Parse CSV, match filenames,
    validate every row (locally,
    before uploading anything)
 3. POST /batches  {rows: [...]}   ──────▶ create batch + items (status: awaiting_images)
 4. For each image (4 at a time):
    downscale to 1024px in-browser,
-   POST /extractions?priority=batch ────▶ store image, queue extraction ─────▶ (low priority)
-   PUT /batches/{id}/items/{n}/images ──▶ attach extraction ids; item → queued
-5. Poll GET /batches/{id}          ◀────── batch runner: as each item's extractions
+   POST /extractions?priority=batch ────▶ store image, queue reading ────────▶ (low priority)
+   PUT /batches/{id}/items/{n}/images ──▶ attach reading ids; item → queued
+5. Poll GET /batches/{id}          ◀────── batch runner: as each item's readings
    (progress, counts, ETA)                 finish, run matching → item reviewed
 6. Triage view: flagged first, same
    result view + decisions as single
@@ -39,119 +39,114 @@ Browser                                   Backend                               
 
 ### Intake format
 
-**Recommended: a folder or ZIP of images plus a CSV manifest.** Each CSV row is one application:
+**A folder of images plus a CSV manifest,** one row per application:
 
 | column | required | notes |
 |---|---|---|
-| `front_image` | yes | filename inside the folder/ZIP |
+| `front_image` | yes | filename inside the folder |
 | `back_image` | no | |
-| `beverage_class` | yes | `distilled_spirits` / `wine` / `malt_beverage` |
-| `imported` | no | `yes`/`no`, default no |
+| `beverage_class` | no | `distilled_spirits` / `wine` / `malt_beverage`; defaults to the class chosen on the page |
+| `imported` | no | `yes` / `no`; defaults to the page setting |
 | `brand_name`, `fanciful_name`, `class_type`, `abv`, `net_contents`, `name_address`, `country_of_origin`, `appellation`, `sulfite_declaration` | no | the declared TTB F 5100.31 values; blank means label-only checks |
-| `reference` | no | free text (e.g. the importer's own ID) carried through to the export |
+| `reference` | no | free text, such as the importer's own ID, carried through to the export |
 
-The UI offers a downloadable template CSV that already has the header row.
+The batch page offers a template CSV with the header row.
 
-Because every declared field is optional, a batch can be **images only**: no CSV, one image per application. That runs the label-only checks (required fields present, exact warning, standard container size), which is still the bulk of the routine work. A filename convention (`<ref>_front.jpg` / `<ref>_back.jpg`) pairs front and back images when there's no CSV.
+Because every declared field is optional, a batch can also be **images only**, with no CSV. That runs the label-only checks (required fields present, exact warning, standard container size), which are still the bulk of the routine work. Files named `<ref>_front.jpg` and `<ref>_back.jpg` are paired automatically.
 
-A later option: one filled-in TTB F 5100.31 PDF per application (matched by filename), reusing the existing `application_pdf.py` extraction. That fits how applications actually arrive, but PDFs don't carry class/type, ABV or net contents, so they only partly replace the CSV.
+A possible later format is one filled-in TTB F 5100.31 PDF per application, matched by filename and read with the existing `application_pdf.py`. It matches how applications actually arrive, but the form does not carry class/type, alcohol content or net contents, so it could only partly replace the CSV.
 
-### Validation (step 2): all of it before anything is uploaded
+### Validation (step 2): complete before anything uploads
 
-This runs in the browser, so it's instant and nothing is sent until the batch is known to be good:
+Validation runs in the browser, so it is instant, and nothing is sent until the batch is known to be good:
 
-- CSV parses; required columns present; `beverage_class` values valid; `abv` numeric.
-- Every referenced filename exists in the dropped folder/ZIP; flag images no row uses (usually a typo).
-- Duplicate rows (same front image referenced twice).
-- File types are images; nothing over the size limit even before downscaling.
+- The CSV parses, the required column is present, `beverage_class` values are valid, and `abv` is numeric.
+- Every referenced filename exists in the dropped folder, with a "did you mean" suggestion for near misses. Images no row uses are reported, since they usually indicate a typo.
+- No front image is referenced twice.
+- Files are images, and none exceeds the size limit.
 
-The agent sees one summary: "298 applications ready · 2 problems: row 14, `back_image` 'NW-114_bak.jpg' not found (did you mean 'NW-114_back.jpg'?) …". They choose **Fix and re-drop**, or **Start anyway (skip 2 rows)**.
+The agent sees one summary, for example "298 applications ready · 2 problems: line 14, back_image 'NW-114_bak.jpg' isn't in the folder — did you mean 'NW-114_back.jpg'?", and can fix and re-drop, or start the rows that are ready.
 
 ### Upload (steps 3–4)
 
-- **Create the batch first, with all rows**, before any images are sent. If the tab closes halfway through, the batch page shows which rows still need images, and re-dropping the same folder resumes the upload. Images already uploaded are skipped: the browser asks the server which rows are still waiting and uploads only those. Content-hash reuse also makes re-sending harmless.
-- **Downscale in the browser** to the same 1024 px long edge the server uses. This cuts upload volume about 20–50× for phone photos, keeps each request small enough for any proxy, and the server re-normalizes anyway.
-- **Upload with bounded parallelism** (4 at a time). Each image goes through the existing `POST /extractions`, so model work starts while the rest are still uploading.
+- **The batch is created first, with all its rows,** before any image is sent. If the tab closes partway through, the batch page shows which rows still need images, and dropping the same folder again uploads only those. Content-hash reuse makes any re-sent image harmless.
+- **Images are downscaled in the browser** to the same 1024 px long edge the server uses. This cuts upload volume 20–50× for phone photos and keeps every request small; the server normalizes again regardless.
+- **Uploads run four at a time.** Each image goes through the ordinary `POST /extractions`, so reading starts while the rest are still uploading.
 
 ### Server side
 
-**Data model** (extends the existing `review_batches` / `batch_items` tables):
+**Data model:**
 
-- `ReviewBatch`: `name`, `status` (`awaiting_images` / `running` / `done` / `cancelled`), `created_at`, `total`, plus counts computed from the items.
-- `BatchItem`: `row_number`, `reference`, `declared` (JSON of the CSV row), `front_extraction_id`, `back_extraction_id`, `application_id` (set once reviewed), `status` (`awaiting_images` / `queued` / `reviewed` / `error` / `skipped`), `error_message`.
+- `ReviewBatch`: name, creation, start and cancellation times. Status and counts are derived from the items.
+- `BatchItem`: `row_number`, `reference`, `declared` (the CSV row as JSON), `front_extraction_id`, `back_extraction_id`, `application_id` (set once reviewed), `status` (`awaiting_images` / `queued` / `reviewed` / `error` / `skipped`), and `error_message`.
 
-**Priority scheduling.** `extraction_service` currently gates Ollama calls with an `asyncio.Semaphore`. Replace it with a small two-level priority gate: interactive extractions (the default) always take the next free slot before batch ones (`POST /extractions?priority=batch`). An agent's single review then waits for at most the one batch image already in progress (about 9 s worst case on the M4), not the whole queue.
+**Priority scheduling.** Model calls pass through a two-level priority gate: interactive readings always take the next free slot ahead of batch readings (`POST /extractions?priority=batch`). A single review therefore waits for at most the batch images already being read, not the whole queue.
 
-**Batch runner.** One background coroutine per running batch. It picks up items whose images are attached, waits for their extractions (`wait_for_extraction`, already written), and calls the same `run_review` the single-review endpoint uses. No second copy of the review logic. The runner doesn't start extractions itself; uploading does that. That keeps "extraction queue" and "review bookkeeping" as separate concerns.
+**Batch runner.** One background task per running batch picks up items as their images are attached, waits for their readings, and calls the same `run_review` used by single reviews, so there is no second copy of the review logic. The runner never starts readings itself; uploading does. That keeps the reading queue and the review bookkeeping separate.
 
-**Surviving restarts.** On startup, the backend finds `running` batches and restarts their runners. Their `pending` extractions are already re-run automatically when awaited. Everything a batch needs is in the database and in `uploads/`, so a restart costs nothing but time.
+**Surviving restarts.** On startup, the backend restarts runners for batches with queued items. Readings that were interrupted are re-run automatically when awaited. Everything a batch needs is in the database and the upload store, so a restart costs only time.
 
-**Failures.** An item whose extraction fails (after the one automatic retry) is marked `error` with the reason, and the batch carries on. **Retry failed items** re-queues them.
+**Failures.** An item whose reading fails, after one automatic retry, is marked `error` with the reason, and the batch continues. Failed items can be retried from the batch page.
 
-This stays single-process, which matches the in-process task registry the rest of the app already assumes: run uvicorn with one worker. If this ever needed several backend processes, the queue would move to something shared: a database-backed job table polled by workers, or Redis/Azure Service Bus.
+This design is single-process, matching the in-process task registry the rest of the application uses (one uvicorn worker). Several backend processes would need a shared queue instead: a database-backed job table polled by workers, or a message broker such as Azure Service Bus.
 
 ### API
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /batches` | Body: `{name, rows: [...]}`. Creates the batch and items (`awaiting_images`) and returns their ids. Validates the rows again on the server; never trusts the browser alone. |
-| `PUT /batches/{id}/items/{item_id}/images` | `{front_extraction_id, back_extraction_id}`. Attaches uploaded images; the item becomes `queued`. |
-| `GET /batches/{id}` | Summary: status, counts by outcome (clear / needs review / error / waiting), throughput-based ETA. |
-| `GET /batches/{id}/items?status=flagged&offset=&limit=` | Paged item list for the triage view: thumbnail id, reference, brand, overall status, decision. |
+| `POST /batches` | Body `{name, rows: [...]}`. Creates the batch and its items (`awaiting_images`) and returns their ids. Rows are validated again on the server. |
+| `PUT /batches/{id}/items/{item_id}/images` | Body `{front_extraction_id, back_extraction_id}`. Attaches the uploaded images; the item becomes `queued`. |
+| `GET /batches/{id}` | Status, counts by outcome, an estimated time remaining, and every item's outcome. |
 | `POST /batches/{id}/cancel`, `POST /batches/{id}/retry-failed` | Control. |
-| `GET /batches/{id}/export.csv` | One row per application: reference, declared values, verdict per field, overall status, the agent's decision and note. |
+| `GET /batches/{id}/export.csv` | One row per application: reference, each field's verdict, overall result, and the agent's decision and note. |
 | `GET /batches` | Recent batches, so an agent can find theirs again. |
 
-Per-item detail and decisions reuse the existing endpoints: `GET /reviews/{application_id}` and `PUT /reviews/{application_id}/decision`.
-
-The current `POST /batches/{id}/items` (one multipart item per request) stays as-is for scripts and the test runner.
+Opening an item and recording a decision reuse the single-review endpoints: `GET /reviews/{application_id}` and `PUT /reviews/{application_id}/decision`.
 
 ### UI
 
-A second page, reachable from a plain **Review one label | Review a batch** switch at the top of the page.
+A second page, reached from a **Review one label | Review a batch** switch at the top of every page.
 
-1. **Start a batch.** A large drop zone ("Drop a folder or ZIP of label photos"), a link to the CSV template, and a one-paragraph explanation. After the drop comes the validation summary described above, then a single **Start review** button.
-2. **Progress.** A large progress bar with a plain sentence under it: "112 of 300 done · about 25 minutes left · you can close this page and come back." Three counts that update live: **Everything checks out**, **Needs your review**, **Couldn't be read**. The page URL is bookmarkable, and "Recent batches" on the start page links back to it.
-3. **Triage.** A list sorted **Needs your review** first. Each row shows a thumbnail, reference, brand name, how many fields need attention, and the decision so far. Opening a row shows the same `ReviewResultView` as a single review (images beside verdicts, Accept / Reject / Needs follow-up), with **Previous / Next** buttons. Keyboard shortcuts are a later addition for fast users like Jenny; big buttons stay the default for everyone else.
-4. **Accept all "Everything checks out"** is the biggest time-saver in a 300-label batch, and the riskiest action in the tool. It needs an explicit confirmation that states the count ("Accept 241 applications that passed every check?"), and it is recorded per item like any other decision. Whether TTB policy even allows bulk acceptance of a pre-screen is a question for Sarah, not an engineering call. **Ship behind that question.**
-5. **Export CSV** on both the progress and triage views.
+1. **Start a batch:** a large drop zone, a link to the CSV template, and a short explanation; then the validation summary and a single start button.
+2. **Progress:** a large progress bar with a plain sentence beneath it ("112 of 300 done · about 5 minutes left · this page can be closed"), and three live counts: **Everything checks out**, **Needs your review**, **Couldn't be read**. The page URL can be bookmarked, and "Recent batches" on the start page links back to it.
+3. **Triage:** items listed **Needs your review** first, each showing its reference, brand name, how many fields need attention, and the decision so far. Opening an item shows the same result view as a single review, with Previous and Next buttons.
+4. **Bulk accept** of everything that passed would save the most time in a 300-label batch, and it is also the riskiest action the tool could offer. It would need an explicit confirmation stating the count, and a per-item record like any other decision. Whether TTB policy allows bulk acceptance of a pre-screen at all is a policy question for TTB, so it is not built.
+5. **Export CSV** from the batch page.
 
 ### Measuring throughput
 
-Before promising 200–300-application turnaround, measure it on the target GPU box:
-
-- Add a `--batch` mode to `testing/run_gauntlet.py` that submits all 43 cases as one batch through the new API. It reports wall-clock time, images per minute, and accuracy against the expected verdicts, so batch mode gets the same correctness check as single reviews.
-- Try `OLLAMA_NUM_PARALLEL` / `OLLAMA_MAX_CONCURRENCY` of 1, 2 and 4. On a discrete GPU, parallel requests usually raise total throughput. On the Mac they mostly just split the same compute.
-- While a batch runs, submit single reviews and confirm their latency stays close to one image's worth (the point of priority scheduling).
+- `testing/run_gauntlet.py --batch` submits all 43 gauntlet cases as one batch through the batch API and checks every result against the expected verdicts, so batch mode gets the same correctness check as single reviews.
+- Concurrency (`BEDROCK_MAX_CONCURRENCY`, or `OLLAMA_NUM_PARALLEL` and `OLLAMA_MAX_CONCURRENCY` for a self-hosted model) is the main throughput setting; on a discrete GPU, parallel requests usually raise total throughput.
+- With a batch running, single reviews should stay close to one image's reading time, which is the purpose of the priority gate. Measured on the self-hosted setup: 11.5 s for a single label with about 80 s of batch work queued ahead of it.
 
 ### Testing
 
-- **Unit:** CSV parsing and validation (missing columns, bad class values, unknown filenames, duplicates); the priority gate (interactive before batch even when batch was queued first); runner resume after a simulated restart.
-- **API**, with the extractor stubbed as in `tests/test_review_flow.py`: full lifecycle (create → attach images → runner reviews → export), a failed item that doesn't stop the batch, retry-failed, cancel.
-- **End-to-end:** the gauntlet `--batch` mode above.
+- **Unit:** CSV parsing and validation (missing columns, bad class values, unknown filenames, duplicates); the priority gate (interactive work ahead of batch work queued earlier).
+- **API,** with the model stubbed out: the full lifecycle (create, attach images, background review, export), a failed item that does not stop the batch, retry, cancel, and resume after a simulated restart.
+- **End to end:** the gauntlet's `--batch` mode.
 
 ## Phasing
 
-1. **MVP:** CSV + folder intake with browser-side validation, the create-then-attach upload flow, server-side runner, progress page, triage list reusing `ReviewResultView`, CSV export. This covers Sarah's scenario end to end.
-2. **Robustness:** priority scheduling, resume on restart, retry and cancel, resumable uploads.
-3. **Extras:** ZIP intake, PDF-per-application intake, bulk accept (pending the policy question), keyboard shortcuts.
+1. **Core:** CSV and folder intake with browser-side validation, the create-then-attach upload flow, the server-side runner, the progress page, the triage list reusing the single-review result view, and CSV export.
+2. **Robustness:** priority scheduling, resume after restart, retry and cancel, resumable uploads.
+3. **Extensions:** ZIP intake, one-PDF-per-application intake, bulk accept (pending the policy question), keyboard shortcuts.
 
 ## Open questions
 
-- What format do importers' submissions actually arrive in? If there's a common export from COLAs Online, intake should read that directly rather than asking agents to build a CSV.
-- Is bulk-accepting pre-screened "clear" labels acceptable to TTB, or must every label get an individual human decision?
-- Should batches be private to the agent who submitted them, or visible to the whole team (e.g. Janet's Seattle office picking up an overflow batch)? This decides whether the prototype needs user identity at all.
+- What format do importers' submissions actually arrive in? If COLAs Online has a common export, intake should read it directly rather than asking agents to build a CSV.
+- Is bulk acceptance of pre-screened "clear" labels acceptable to TTB, or must every label receive an individual decision?
+- Should batches be private to the agent who submitted them, or visible to the whole team (for example, the Seattle office picking up an overflow batch)? The answer decides whether the prototype needs user identity at all.
 
 ## What was built
 
-Phases 1 and 2, as described above: CSV + folder intake, validated in the browser (`frontend/app/batches/intake.ts`, unit-tested); create-then-attach uploads with in-browser downscaling; the server-side runner (`backend/app/batch_service.py`); priority scheduling (`backend/app/priority_gate.py`); resume on restart; retry and cancel; the progress + triage pages; CSV export; and the gauntlet's `--batch` mode.
+Phases 1 and 2: CSV and folder intake validated in the browser (`frontend/app/batches/intake.ts`, unit-tested), create-then-attach uploads with in-browser downscaling, the server-side runner (`backend/app/batch_service.py`), priority scheduling (`backend/app/priority_gate.py`), resume after restart, retry and cancel, the progress and triage pages, CSV export, and the gauntlet's `--batch` mode.
 
-Differences from the plan:
+Differences from the design:
 
-- **The old `POST /batches/{id}/items` endpoint was removed**, not kept. It would have been a second path for creating batch items, with its own review semantics, and nothing used it. Scripts use the same create → upload → attach flow as the UI (see `run_as_batch` in `testing/run_gauntlet.py`).
-- **No pagination on `GET /batches/{id}`.** 300 compact rows is ~100 KB, and one response keeps the triage view simple. It becomes necessary around the 1,000-row cap.
-- **Priority is set when an image is uploaded.** If an agent uploads an image that's already queued as part of a batch, the reading is reused but keeps its batch priority.
+- **One way to add items.** An earlier multipart endpoint for adding batch items one at a time was removed rather than kept: it would have been a second path with its own review semantics. Scripts use the same create, upload and attach flow as the UI (`run_as_batch` in `testing/run_gauntlet.py`).
+- **No pagination on `GET /batches/{id}`.** 300 compact rows are about 100 KB, and one response keeps the triage view simple. Pagination would matter near the 1,000-row limit.
+- **Priority is fixed when an image is uploaded.** If an agent uploads an image already queued as part of a batch, the reading is shared but keeps its batch priority.
 
-Found and fixed while building it: every review waiting on its extraction held a pooled database connection for the whole wait. A batch with more rows waiting than the pool has connections (15) deadlocked the backend, because the next connection checkout blocked the event loop the waiting reviews needed. `wait_for_extraction` now releases its connection before waiting, and `test_more_waiting_reviews_than_database_connections_does_not_deadlock` covers it.
+One defect was found and fixed during the build. Every review waiting on a reading held a pooled database connection for the whole wait, so a batch with more waiting rows than the pool had connections (15) deadlocked the backend: the next connection checkout blocked the event loop that the waiting reviews needed. `wait_for_extraction` now releases its connection before waiting, and a regression test covers it.
 
-Not built (phase 3): ZIP intake, PDF-per-application intake, bulk accept (pending the policy question), keyboard shortcuts.
+Not built (phase 3): ZIP intake, one-PDF-per-application intake, bulk accept, and keyboard shortcuts.
