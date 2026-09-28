@@ -120,6 +120,36 @@ def test_unreadable_row_does_not_stop_the_batch_and_can_be_retried(client, monke
     assert [i["status"] for i in batch["items"]] == ["reviewed", "reviewed"]
 
 
+def test_unexpected_review_error_fails_the_row_instead_of_retrying_forever(client, monkeypatch):
+    from app import batch_service
+
+    async def broken_review(db, application, **kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(batch_service, "run_review", broken_review)
+    batch = _create(client, [_row(1, back_image=None)])
+    _attach(client, batch["id"], batch["items"][0]["id"], _front(1))
+
+    batch = _wait_until_settled(client, batch["id"])
+    assert batch["items"][0]["status"] == "error"
+    assert batch["items"][0]["error_message"].startswith("Something went wrong")
+    assert batch["status"] == "done"
+
+
+def test_export_neutralizes_spreadsheet_formulas(client):
+    batch = _create(client, [_row(1, back_image=None, reference='=HYPERLINK("http://evil")')])
+    item = batch["items"][0]
+    _attach(client, batch["id"], item["id"], _front(1))
+    batch = _wait_until_settled(client, batch["id"])
+    application_id = batch["items"][0]["application_id"]
+    client.put(f"/reviews/{application_id}/decision", json={"decision": "accept", "note": "+1 looks fine"})
+
+    export = list(csv.DictReader(io.StringIO(client.get(f"/batches/{batch['id']}/export.csv").text)))
+    assert export[0]["reference"] == '\'=HYPERLINK("http://evil")'
+    assert export[0]["decision_note"] == "'+1 looks fine"
+    assert export[0]["decision"] == "accept"
+
+
 def test_cancel_skips_rows_not_yet_reviewed(client):
     batch = _create(client, [_row(1, back_image=None), _row(2, back_image=None)])
     _attach(client, batch["id"], batch["items"][0]["id"], _front(1))

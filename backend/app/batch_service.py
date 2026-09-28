@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import logging
 from collections import Counter
 from datetime import UTC, datetime
 
@@ -51,6 +52,10 @@ _REVIEW_CONCURRENCY = 16
 _POLL_SECONDS = 1.0
 
 _runners: dict[str, asyncio.Task] = {}
+
+logger = logging.getLogger(__name__)
+
+_REVIEW_FAILED = "Something went wrong reviewing this application. Please try it again."
 
 
 class BatchError(ValueError):
@@ -211,6 +216,14 @@ async def _review_item(item_id: str, slots: asyncio.Semaphore) -> None:
             except ExtractionFailedError as exc:
                 item.status = ERROR
                 item.error_message = str(exc)
+            except Exception:
+                # Left "queued", the runner would pick this row up again every
+                # second, forever, and the batch would never finish.
+                logger.exception("Batch row %s failed unexpectedly", item_id)
+                db.rollback()
+                item = db.get(BatchItem, item_id)
+                item.status = ERROR
+                item.error_message = _REVIEW_FAILED
             db.commit()
 
 
@@ -319,6 +332,15 @@ _EXPORT_FIELDS = [
     "sulfite_declaration",
 ]
 _RESULT_LABELS = {"clear": "Everything checks out", "flagged": "Needs review"}
+# A cell starting with one of these is run as a formula when the export is
+# opened in Excel or Sheets, and references, filenames and notes come from
+# importers and agents. A leading apostrophe makes the spreadsheet show it
+# as plain text.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _safe_cell(value: object) -> object:
+    return f"'{value}" if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES) else value
 
 
 def export_csv(db: Session, batch: ReviewBatch) -> str:
@@ -347,7 +369,7 @@ def export_csv(db: Session, batch: ReviewBatch) -> str:
             if c.status != MATCH
         )
         decision = summary.decision
-        writer.writerow(
+        row = (
             [item.row_number, item.reference or "", item.front_image_name, item.back_image_name or "", result]
             + [by_field[field].status if field in by_field else "" for field in _EXPORT_FIELDS]
             + [
@@ -359,4 +381,5 @@ def export_csv(db: Session, batch: ReviewBatch) -> str:
                 item.application_id or "",
             ]
         )
+        writer.writerow([_safe_cell(cell) for cell in row])
     return out.getvalue()

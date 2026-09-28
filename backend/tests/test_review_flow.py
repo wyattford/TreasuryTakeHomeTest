@@ -11,6 +11,25 @@ def _upload(client, image: bytes) -> dict:
     return response.json()
 
 
+def test_unexpected_extraction_error_fails_once_instead_of_rerunning_on_every_poll(client, monkeypatch):
+    from app import extraction_service
+
+    calls = {"n": 0}
+
+    async def broken(image):
+        calls["n"] += 1
+        raise ValueError("Expecting value: line 1 column 1 (char 0)")  # e.g. a 200 with a non-JSON body
+
+    monkeypatch.setattr(extraction_service, "extract_label_fields", broken)
+    started = client.post("/extractions", files={"image": ("a.png", FRONT_PNG, "image/png")}).json()
+    statuses = [client.get(f"/extractions/{started['id']}?wait=1").json()["status"] for _ in range(5)]
+
+    assert statuses == ["error"] * 5
+    assert calls["n"] == 1
+    body = client.get(f"/extractions/{started['id']}").json()
+    assert body["error_message"] == "Something went wrong reading this label. Please try again."
+
+
 def test_upload_then_review_with_extraction_ids(client):
     front = _upload(client, FRONT_PNG)
     back = _upload(client, BACK_PNG)

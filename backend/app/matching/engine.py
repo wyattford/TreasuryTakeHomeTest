@@ -25,7 +25,13 @@ from app.data.ttb_rules import (
     is_standard_fill,
     required_fields_for,
 )
-from app.matching.text_utils import FUZZY_MATCH_THRESHOLD, normalize, parse_net_contents_ml, similarity
+from app.matching.text_utils import (
+    FUZZY_MATCH_THRESHOLD,
+    normalize,
+    normalize_statement,
+    parse_net_contents_ml,
+    similarity,
+)
 from app.schemas import ApplicationIn, ExtractedLabelFields
 
 MATCH = "match"
@@ -166,7 +172,7 @@ def _warning_verdict(extracted_text: str | None) -> Verdict:
             MISMATCH,
             '"GOVERNMENT WARNING" must appear in capital letters (27 CFR 16.21).',
         )
-    if normalize(extracted_text) == normalize(GOVERNMENT_WARNING_TEXT):
+    if normalize_statement(extracted_text) == normalize_statement(GOVERNMENT_WARNING_TEXT):
         return Verdict(field_name, GOVERNMENT_WARNING_TEXT, extracted_text, "exact", MATCH)
     return Verdict(
         field_name,
@@ -174,7 +180,7 @@ def _warning_verdict(extracted_text: str | None) -> Verdict:
         extracted_text,
         "exact",
         MISMATCH,
-        "Wording does not match the statement prescribed verbatim by 27 CFR 16.21.",
+        "Wording or punctuation does not match the statement prescribed verbatim by 27 CFR 16.21.",
     )
 
 

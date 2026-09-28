@@ -37,6 +37,15 @@ def test_transparent_png_is_flattened_to_rgb():
         assert result.getpixel((50, 50)) == (255, 255, 255)
 
 
+def test_image_with_too_many_pixels_is_refused_before_decoding():
+    # 64 MP, but a 1-bit solid image compresses to a few KB.
+    out = io.BytesIO()
+    Image.new("1", (8000, 8000)).save(out, format="PNG")
+    assert len(out.getvalue()) < 100_000
+    with pytest.raises(InvalidImageError, match="too large"):
+        normalize_label_image(out.getvalue())
+
+
 def test_non_image_is_rejected():
     with pytest.raises(InvalidImageError):
         normalize_label_image(b"%PDF-1.7 not an image")

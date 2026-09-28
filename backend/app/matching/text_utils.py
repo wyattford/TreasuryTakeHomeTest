@@ -28,6 +28,20 @@ def normalize(text: str) -> str:
     return text
 
 
+# Typographic variants a label (or its transcription) may use for the same
+# character; none of them changes the wording.
+_TYPOGRAPHIC = str.maketrans({"\u2018": "'", "\u2019": "'", "\u201c": '"', "\u201d": '"', "\u2013": "-", "\u2014": "-"})
+
+
+def normalize_statement(text: str) -> str:
+    """For statements whose exact wording is prescribed: casefold, collapse
+    whitespace and line breaks, and unify curly quotes and dashes, but keep
+    every other punctuation mark. A missing colon or "(1)" is a real
+    difference here, unlike in a brand name."""
+
+    return _WHITESPACE_RE.sub(" ", text.translate(_TYPOGRAPHIC)).strip().casefold()
+
+
 def similarity(a: str, b: str) -> float:
     """0.0-1.0 similarity ratio between normalized strings."""
 
@@ -49,9 +63,21 @@ _ML_PER_UNIT: dict[str, float] = {
 # states the same volume twice, whereas "1 PINT 8 FL OZ" is one volume split
 # across two units and has to be summed.
 _METRIC_RE = re.compile(
-    r"(\d+(?:[.,]\d+)?)\s*(ml|milliliters?|millilitres?|cl|centiliters?|centilitres?|l|liters?|litres?)\b", re.I
+    r"(\d+(?:,\d{3})+|\d+(?:[.,]\d+)?)\s*(ml|milliliters?|millilitres?|cl|centiliters?|centilitres?|l|liters?|litres?)\b", re.I
 )
 _US_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(fl\.?\s*oz\.?|fluid\s+ounces?|pints?|pts?\b|quarts?|qts?\b|gallons?|gal\b)", re.I)
+
+
+_THOUSANDS_RE = re.compile(r"[1-9]\d{0,2}(?:,\d{3})+")
+
+
+def _metric_number(raw: str) -> float:
+    """A comma is a thousands separator in "1,000" and a decimal point in
+    European "0,75" or "1,5"."""
+
+    if _THOUSANDS_RE.fullmatch(raw):
+        return float(raw.replace(",", ""))
+    return float(raw.replace(",", "."))
 
 
 def _metric_unit(raw: str) -> str:
@@ -81,7 +107,7 @@ def parse_net_contents_ml(text: str) -> float | None:
 
     metric = _METRIC_RE.search(text)
     if metric:
-        value = float(metric.group(1).replace(",", "."))
+        value = _metric_number(metric.group(1))
         return round(value * _ML_PER_UNIT[_metric_unit(metric.group(2))], 2)
 
     us_matches = list(_US_RE.finditer(text))

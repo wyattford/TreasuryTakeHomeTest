@@ -12,6 +12,9 @@ from app.matching.text_utils import parse_net_contents_ml
         ("1.75 L", 1750),
         ("1 Liter", 1000),
         ("0,75 l", 750),
+        ("1,5 L", 1500),
+        ("1,000 mL", 1000),  # thousands separator, not a decimal comma
+        ("1,750 ml", 1750),
         ("12 FL OZ", 354.88),
         ("12 fl. oz.", 354.88),
         ("1 PINT 8 FL OZ", 709.76),

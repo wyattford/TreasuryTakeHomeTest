@@ -39,6 +39,10 @@ PRIORITIES = {"interactive": INTERACTIVE, "batch": BATCH}
 
 logger = logging.getLogger(__name__)
 
+# For a failure no model client anticipated (a bug, a malformed response).
+# Shown to the agent; the traceback goes to the log.
+_UNEXPECTED_ERROR = "Something went wrong reading this label. Please try again."
+
 _tasks: dict[str, asyncio.Task] = {}
 _model_gate: PriorityGate | None = None
 
@@ -172,6 +176,12 @@ async def _run(extraction_id: str, image: bytes, priority: int) -> None:
     except asyncio.CancelledError:
         _finish(extraction_id, CANCELLED, None, None, "Cancelled before it finished.")
         raise
+    except Exception:
+        # Never leave the record "pending" with no task behind it: every
+        # status check would then start the model again (see
+        # wait_for_extraction), paying for a fresh failure each time.
+        logger.exception("Extraction %s failed unexpectedly", extraction_id)
+        status, error = ERROR, _UNEXPECTED_ERROR
     _finish(extraction_id, status, fields.model_dump() if fields else None, latency_ms, error)
 
 

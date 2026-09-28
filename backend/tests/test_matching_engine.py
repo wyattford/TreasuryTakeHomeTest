@@ -1,3 +1,5 @@
+import pytest
+
 from app.matching.engine import FLAGGED, MATCH, MISMATCH, MISSING, compare
 from app.schemas import ApplicationIn, ExtractedLabelFields
 
@@ -76,6 +78,24 @@ def test_warning_statement_title_case_is_a_mismatch():
     bad_warning = GOOD_WARNING.replace("GOVERNMENT WARNING", "Government Warning")
     verdicts = compare(_application(), _extracted(government_warning_text=bad_warning))
     assert _verdict(verdicts, "government_warning").status == MISMATCH
+
+
+@pytest.mark.parametrize(
+    "altered",
+    [
+        GOOD_WARNING.replace("GOVERNMENT WARNING:", "GOVERNMENT WARNING"),  # colon dropped
+        GOOD_WARNING.replace("(1)", "1").replace("(2)", "2"),  # numbering parentheses dropped
+    ],
+)
+def test_warning_statement_punctuation_counts(altered):
+    verdicts = compare(_application(), _extracted(government_warning_text=altered))
+    assert _verdict(verdicts, "government_warning").status == MISMATCH
+
+
+def test_warning_statement_ignores_line_breaks_and_extra_spaces():
+    reflowed = GOOD_WARNING.replace(" (2) ", "\n(2) ").replace("women", " women ")
+    verdicts = compare(_application(), _extracted(government_warning_text=reflowed))
+    assert _verdict(verdicts, "government_warning").status == MATCH
 
 
 def test_missing_warning_statement_is_missing_not_mismatch():
