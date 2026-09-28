@@ -6,11 +6,17 @@ It is a **pre-screen only**. The agent makes every decision, and only TTB can ap
 
 **Live demo:** https://cola-demo.wjford.dev. Any photo of a bottle label works; synthetic test labels can be generated with [`testing/generate_fixtures.py`](testing/README.md).
 
+## Summary
+
+- **Approach:** an open-weight vision-language model transcribes each label image into structured fields as soon as it is uploaded. Deterministic, unit-tested code then checks every field against the application and TTB's labeling rules, and flags anything that needs a human look; the agent makes the final call. Because reading starts at upload (about 1.5 s per image), the result is normally ready the moment the agent presses Review. Batches of hundreds of applications run in the background, behind single reviews. See [Approach](#approach).
+- **Tools:** a Python/FastAPI backend and a Next.js frontend, with Llama 4 Maverick on Amazon Bedrock as the model (or Qwen2.5-VL on self-hosted Ollama), deployed with Docker Compose. See [Tools used](#tools-used).
+- **Assumptions:** the tool pre-screens and the agent decides; only beverage class and import status are required inputs; the Government Warning must match word for word; the agency firewall rules out vendor-only models; a prototype needs no COLA integration or login. See [Assumptions](#assumptions).
+
 ## Why this exists
 
 TTB's 47 agents review about 150,000 label applications a year, and much of that time goes to data-entry verification: confirming that the brand name, alcohol content and net contents on the label match the application. This tool automates the matching so agents can spend their attention on the judgment calls.
 
-## How it works
+## Approach
 
 ```
 Agent picks label photo(s) ──▶ POST /extractions (one per image, returns immediately)
@@ -73,15 +79,17 @@ Ollama can constrain a model's output to a JSON schema, which guarantees *valid*
 
 **Qwen2.5-VL 7B via Ollama on an Apple M4 Pro** (the self-hosted option): 6–9 s per image, with a median of 12.1 s (range 4–16 s) when both images are submitted together with no head start. A dedicated GPU would be considerably faster.
 
-## Tech stack
+## Tools used
 
-| Component | Technology |
+| Area | Tools |
 |---|---|
-| Backend | Python 3.12, FastAPI, SQLAlchemy, SQLite |
+| Backend | Python 3.12, FastAPI, Pydantic, SQLAlchemy, SQLite, httpx |
 | Frontend | Next.js (App Router), React, TypeScript, Tailwind CSS |
-| Model serving | [Amazon Bedrock](https://aws.amazon.com/bedrock/) (Converse API), or [Ollama](https://ollama.com/) self-hosted |
-| Vision-language model | Llama 4 Maverick 17B on Bedrock; Qwen2.5-VL 7B on Ollama; both open-weight |
-| Package management | [uv](https://docs.astral.sh/uv/) (backend), npm (frontend) |
+| Vision-language model | Llama 4 Maverick 17B on [Amazon Bedrock](https://aws.amazon.com/bedrock/) (Converse API); Qwen2.5-VL 7B on self-hosted [Ollama](https://ollama.com/). Both open-weight |
+| Image and document handling | Pillow (photo normalization), pypdf (TTB F 5100.31 pre-fill) |
+| Testing | pytest (backend), Node's built-in test runner (frontend), and a custom end-to-end gauntlet of 43 labels rendered with Pillow |
+| Code quality | Ruff (Python lint and format), ESLint, TypeScript type checking |
+| Packaging and deployment | [uv](https://docs.astral.sh/uv/) and npm; Docker Compose on a Linux VPS behind an HTTPS reverse proxy |
 
 ## Running locally
 
