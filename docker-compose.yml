@@ -1,0 +1,34 @@
+# The whole app on one port: the frontend serves the UI and forwards /api/*
+# to the backend, which is only reachable inside this compose network.
+#
+#   docker compose up -d --build
+#
+# Needs backend/.env (copy backend/.env.example; for Bedrock set
+# INFERENCE_PROVIDER=bedrock and BEDROCK_KEY). By default the app is
+# published on 127.0.0.1:3000; set PUBLISH_ADDR / PUBLISH_PORT in a .env
+# next to this file to publish it where your reverse proxy can reach it.
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      # Fixed here so a local-dev backend/.env can't point the container at
+      # a database path or origin that doesn't exist inside it.
+      DATABASE_URL: sqlite:////app/data/ttb_review.db
+      OLLAMA_WARMUP_ON_STARTUP: "false"
+    volumes:
+      - data:/app/data
+      - uploads:/app/uploads
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${PUBLISH_ADDR:-127.0.0.1}:${PUBLISH_PORT:-3000}:3000"
+
+volumes:
+  data:
+  uploads:
