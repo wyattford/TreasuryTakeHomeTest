@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 from datetime import UTC, datetime
 
 from fastapi.concurrency import run_in_threadpool
@@ -35,6 +36,8 @@ ERROR = "error"
 CANCELLED = "cancelled"
 
 PRIORITIES = {"interactive": INTERACTIVE, "batch": BATCH}
+
+logger = logging.getLogger(__name__)
 
 _tasks: dict[str, asyncio.Task] = {}
 _model_gate: PriorityGate | None = None
@@ -163,6 +166,8 @@ async def _run(extraction_id: str, image: bytes, priority: int) -> None:
             fields, latency_ms = await extract_label_fields(image)
         status = DONE
     except ModelUnavailableError as exc:
+        # The agent sees the plain-language message; the reason goes here.
+        logger.warning("Extraction %s failed: %s", extraction_id, exc.detail or exc)
         status, error = ERROR, str(exc)
     except asyncio.CancelledError:
         _finish(extraction_id, CANCELLED, None, None, "Cancelled before it finished.")

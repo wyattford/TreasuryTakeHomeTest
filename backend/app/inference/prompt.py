@@ -12,7 +12,22 @@ from app.schemas import ExtractedLabelFields
 
 
 class ModelUnavailableError(RuntimeError):
-    """Raised when the vision model can't be reached or returns an unusable response."""
+    """Raised when the vision model can't be reached or returns an unusable
+    response. The message is shown to the agent as-is, so it's one of the
+    plain-language messages below; ``detail`` is the technical reason, for
+    the server log."""
+
+    def __init__(self, message: str, detail: str | None = None):
+        super().__init__(message)
+        self.detail = detail
+
+
+# What the agent is told. None of these name a vendor, a status code, or a
+# setting: the agent can't act on those, and whoever can reads the log.
+MODEL_NOT_SET_UP = "The label reader isn't available right now. Please try again later, or let your system administrator know."
+MODEL_UNREACHABLE = "The label reader couldn't be reached. Please try again in a minute."
+MODEL_BUSY = "The label reader is busy right now. Please try again in a minute."
+LABEL_UNREADABLE = "This photo couldn't be read. Try a sharper, straight-on photo of the label."
 
 
 def _describe_fields() -> str:

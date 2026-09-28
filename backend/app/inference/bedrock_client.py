@@ -23,6 +23,10 @@ import httpx
 from app.config import settings
 from app.inference.prompt import (
     EXTRACTION_SYSTEM_PROMPT,
+    LABEL_UNREADABLE,
+    MODEL_BUSY,
+    MODEL_NOT_SET_UP,
+    MODEL_UNREACHABLE,
     RETRY_PROMPT,
     USER_PROMPT,
     ModelUnavailableError,
@@ -42,7 +46,7 @@ async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]
     back, ModelUnavailableError if no usable answer comes back."""
 
     if not settings.bedrock_key:
-        raise ModelUnavailableError("Bedrock is selected but BEDROCK_KEY isn't set.")
+        raise ModelUnavailableError(MODEL_NOT_SET_UP, "Bedrock is selected but BEDROCK_KEY isn't set.")
 
     messages = [
         {
@@ -73,7 +77,9 @@ async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]
                     {"role": "user", "content": [{"text": RETRY_PROMPT}]},
                 ]
 
-    raise ModelUnavailableError(f"Bedrock response did not match the expected schema after a retry: {last_error}")
+    raise ModelUnavailableError(
+        LABEL_UNREADABLE, f"Bedrock response did not match the expected schema after a retry: {last_error}"
+    )
 
 
 async def _converse(client: httpx.AsyncClient, messages: list[dict]) -> str:
@@ -88,7 +94,9 @@ async def _converse(client: httpx.AsyncClient, messages: list[dict]) -> str:
         try:
             response = await client.post(url, json=payload)
         except httpx.HTTPError as exc:
-            raise ModelUnavailableError(f"Could not reach Bedrock in {settings.bedrock_region}: {exc}") from exc
+            raise ModelUnavailableError(
+                MODEL_UNREACHABLE, f"Could not reach Bedrock in {settings.bedrock_region}: {exc!r}"
+            ) from exc
         if response.status_code in _RETRYABLE_STATUSES and backoff is not None:
             await asyncio.sleep(backoff)
             continue
@@ -96,18 +104,25 @@ async def _converse(client: httpx.AsyncClient, messages: list[dict]) -> str:
 
     if response.status_code != 200:
         # Bedrock errors are JSON {"message": "..."}: an unknown model id,
-        # a key without access, a quota exceeded.
+        # a key without access (or one a budget action has shut off), a
+        # quota exceeded. Only the log gets Bedrock's own words.
         try:
             reason = response.json().get("message", response.text)
         except ValueError:
             reason = response.text
-        raise ModelUnavailableError(f"Bedrock rejected the request ({response.status_code}): {reason}")
+        if response.status_code == 429:
+            message = MODEL_BUSY
+        elif response.status_code >= 500:
+            message = MODEL_UNREACHABLE
+        else:
+            message = MODEL_NOT_SET_UP
+        raise ModelUnavailableError(message, f"Bedrock rejected the request ({response.status_code}): {reason}")
 
     body = response.json()
     try:
         return next(block["text"] for block in body["output"]["message"]["content"] if "text" in block)
     except (KeyError, StopIteration) as exc:
-        raise ModelUnavailableError(f"Bedrock returned no text (stopReason={body.get('stopReason')})") from exc
+        raise ModelUnavailableError(LABEL_UNREADABLE, f"Bedrock returned no text (stopReason={body.get('stopReason')})") from exc
 
 
 async def warm_up() -> None:

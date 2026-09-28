@@ -32,10 +32,26 @@ export interface ReviewFormValues {
   sulfiteDeclaration: string;
 }
 
+/** fetch, but with a message an agent can act on when the server can't be
+ * reached at all. The browser's own ("Failed to fetch", "Load failed")
+ * doesn't say what happened or what to do. */
+async function request(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new Error("Couldn't reach the server. Check your internet connection and try again.");
+  }
+}
+
 async function throwIfNotOk(res: Response, fallbackMessage: string): Promise<void> {
   if (res.ok) return;
   const body = await res.json().catch(() => null);
-  throw new Error(typeof body?.detail === "string" ? body.detail : fallbackMessage);
+  if (typeof body?.detail === "string") throw new Error(body.detail);
+  // No message from the backend: the request never got a proper answer,
+  // e.g. the proxy timed out or refused the upload.
+  if (res.status === 413) throw new Error("That file is too large. Photos can be up to 20 MB.");
+  if (res.status >= 502 && res.status <= 504) throw new Error("The server didn't respond in time. Please try again.");
+  throw new Error(fallbackMessage);
 }
 
 function appendIfSet(form: FormData, key: string, value: string) {
@@ -75,8 +91,8 @@ export async function startExtraction(
 ): Promise<ExtractionOut> {
   const form = new FormData();
   form.append("image", image);
-  const res = await fetch(`${API_BASE}/extractions?priority=${priority}`, { method: "POST", body: form });
-  await throwIfNotOk(res, `Upload failed (${res.status}).`);
+  const res = await request(`${API_BASE}/extractions?priority=${priority}`, { method: "POST", body: form });
+  await throwIfNotOk(res, "Upload failed. Please try again.");
   return (await res.json()) as ExtractionOut;
 }
 
@@ -84,8 +100,8 @@ export async function startExtraction(
  * says the caller stopped caring (e.g. the user picked a different photo). */
 export async function waitForExtraction(id: string, isStale: () => boolean): Promise<ExtractionOut | null> {
   while (!isStale()) {
-    const res = await fetch(`${API_BASE}/extractions/${id}?wait=${EXTRACTION_POLL_WAIT_SECONDS}`);
-    await throwIfNotOk(res, `Checking the upload failed (${res.status}).`);
+    const res = await request(`${API_BASE}/extractions/${id}?wait=${EXTRACTION_POLL_WAIT_SECONDS}`);
+    await throwIfNotOk(res, "Checking the upload failed. Please try again.");
     const extraction = (await res.json()) as ExtractionOut;
     if (extraction.status !== "pending") return extraction;
   }
@@ -98,23 +114,23 @@ export function cancelExtraction(id: string): void {
 }
 
 export async function submitReview(values: ReviewFormValues): Promise<ReviewResult> {
-  const res = await fetch(`${API_BASE}/reviews`, {
+  const res = await request(`${API_BASE}/reviews`, {
     method: "POST",
     body: toFormData(values),
   });
 
-  await throwIfNotOk(res, `Review request failed (${res.status}).`);
+  await throwIfNotOk(res, "The review couldn't be completed. Please try again.");
 
   return (await res.json()) as ReviewResult;
 }
 
 export async function saveDecision(applicationId: string, decision: Decision, note: string): Promise<DecisionOut> {
-  const res = await fetch(`${API_BASE}/reviews/${applicationId}/decision`, {
+  const res = await request(`${API_BASE}/reviews/${applicationId}/decision`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ decision, note }),
   });
-  await throwIfNotOk(res, `Saving the decision failed (${res.status}).`);
+  await throwIfNotOk(res, "Saving the decision failed. Please try again.");
   return (await res.json()) as DecisionOut;
 }
 
@@ -122,29 +138,29 @@ export async function extractApplicationPdf(file: File): Promise<ExtractedApplic
   const form = new FormData();
   form.append("file", file);
 
-  const res = await fetch(`${API_BASE}/applications/extract-pdf`, {
+  const res = await request(`${API_BASE}/applications/extract-pdf`, {
     method: "POST",
     body: form,
   });
 
-  await throwIfNotOk(res, `PDF extraction failed (${res.status}).`);
+  await throwIfNotOk(res, "Reading the PDF failed. Please try again.");
 
   return (await res.json()) as ExtractedApplicationFields;
 }
 
 export async function getReview(applicationId: string): Promise<ReviewResult> {
-  const res = await fetch(`${API_BASE}/reviews/${applicationId}`);
-  await throwIfNotOk(res, `Loading the review failed (${res.status}).`);
+  const res = await request(`${API_BASE}/reviews/${applicationId}`);
+  await throwIfNotOk(res, "Loading the review failed. Please try again.");
   return (await res.json()) as ReviewResult;
 }
 
 async function sendJson<T>(method: string, path: string, body: unknown, fallback: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await request(`${API_BASE}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  await throwIfNotOk(res, `${fallback} (${res.status}).`);
+  await throwIfNotOk(res, `${fallback}. Please try again.`);
   return (await res.json()) as T;
 }
 
@@ -170,14 +186,14 @@ export function attachBatchImages(
 }
 
 export async function getBatch(batchId: string): Promise<BatchOut> {
-  const res = await fetch(`${API_BASE}/batches/${batchId}`);
-  await throwIfNotOk(res, `Loading the batch failed (${res.status}).`);
+  const res = await request(`${API_BASE}/batches/${batchId}`);
+  await throwIfNotOk(res, "Loading the batch failed. Please try again.");
   return (await res.json()) as BatchOut;
 }
 
 export async function listBatches(): Promise<BatchSummaryOut[]> {
-  const res = await fetch(`${API_BASE}/batches`);
-  await throwIfNotOk(res, `Loading recent batches failed (${res.status}).`);
+  const res = await request(`${API_BASE}/batches`);
+  await throwIfNotOk(res, "Loading recent batches failed. Please try again.");
   return (await res.json()) as BatchSummaryOut[];
 }
 

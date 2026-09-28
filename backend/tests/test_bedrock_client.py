@@ -6,6 +6,7 @@ import pytest
 
 from app.config import settings
 from app.inference import ModelUnavailableError, bedrock_client
+from app.inference.prompt import MODEL_NOT_SET_UP
 
 FIELDS_JSON = '{"brand_name": "OLD TOM DISTILLERY", "abv_percent": 45.0, "other_disclosures": [], "illegible_fields": []}'
 
@@ -75,16 +76,27 @@ def test_waits_and_retries_when_throttled(bedrock):
     assert len(bedrock["requests"]) == 2
 
 
-def test_surfaces_bedrocks_reason_for_a_rejected_request(bedrock):
+def test_a_rejected_request_tells_the_agent_plainly_and_logs_bedrocks_reason(bedrock):
     bedrock["responses"] = [httpx.Response(403, json={"message": "You don't have access to the model"})]
 
-    with pytest.raises(ModelUnavailableError, match="403.*don't have access"):
+    with pytest.raises(ModelUnavailableError) as raised:
+        extract()
+
+    assert str(raised.value) == MODEL_NOT_SET_UP
+    assert "403" in raised.value.detail and "don't have access" in raised.value.detail
+
+
+def test_still_throttled_after_retries_says_busy(bedrock):
+    bedrock["responses"] = [httpx.Response(429, json={"message": "Too many requests"})] * 3
+
+    with pytest.raises(ModelUnavailableError, match="busy"):
         extract()
 
 
 def test_refuses_to_call_without_a_key(bedrock, monkeypatch):
     monkeypatch.setattr(settings, "bedrock_key", "")
 
-    with pytest.raises(ModelUnavailableError, match="BEDROCK_KEY"):
+    with pytest.raises(ModelUnavailableError) as raised:
         extract()
+    assert "BEDROCK_KEY" in raised.value.detail
     assert bedrock["requests"] == []

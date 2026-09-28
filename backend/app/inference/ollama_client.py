@@ -35,6 +35,9 @@ import httpx
 from app.config import settings
 from app.inference.prompt import (
     EXTRACTION_SYSTEM_PROMPT,
+    LABEL_UNREADABLE,
+    MODEL_NOT_SET_UP,
+    MODEL_UNREACHABLE,
     RETRY_PROMPT,
     USER_PROMPT,
     ModelUnavailableError,
@@ -77,7 +80,9 @@ async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]
                     {"role": "user", "content": RETRY_PROMPT},
                 ]
 
-    raise ModelUnavailableError(f"Ollama response did not match the expected schema after a retry: {last_error}")
+    raise ModelUnavailableError(
+        LABEL_UNREADABLE, f"Ollama response did not match the expected schema after a retry: {last_error}"
+    )
 
 
 async def _chat(client: httpx.AsyncClient, messages: list[dict]) -> str:
@@ -93,16 +98,18 @@ async def _chat(client: httpx.AsyncClient, messages: list[dict]) -> str:
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         # Ollama returns 404 with a JSON {"error": "..."} body for problems
-        # like an unpulled model — surface that reason, not just the status.
+        # like an unpulled model — log that reason, not just the status.
         reason = exc.response.json().get("error", exc.response.text) if exc.response.content else str(exc)
-        raise ModelUnavailableError(f"Ollama at {settings.ollama_base_url} rejected the request: {reason}") from exc
+        raise ModelUnavailableError(
+            MODEL_NOT_SET_UP, f"Ollama at {settings.ollama_base_url} rejected the request: {reason}"
+        ) from exc
     except httpx.HTTPError as exc:
-        raise ModelUnavailableError(f"Could not reach Ollama at {settings.ollama_base_url}: {exc}") from exc
+        raise ModelUnavailableError(MODEL_UNREACHABLE, f"Could not reach Ollama at {settings.ollama_base_url}: {exc!r}") from exc
 
     body = response.json()
     content = body.get("message", {}).get("content")
     if not content:
-        raise ModelUnavailableError(f"Ollama returned no content: {body}")
+        raise ModelUnavailableError(LABEL_UNREADABLE, f"Ollama returned no content: {body}")
     return content
 
 

@@ -84,7 +84,7 @@ async def run_review(db: Session, application: Application, *, started: float | 
 async def _finished_extraction(db: Session, extraction_id: str, side: str) -> ImageExtraction:
     record = await wait_for_extraction(db, extraction_id, retry_failed=True)
     if record.status != DONE:
-        raise ExtractionFailedError(f"Couldn't read the {side} label image: {record.error_message or record.status}")
+        raise ExtractionFailedError(f"Couldn't read the {side} label. {record.error_message or 'Please upload it again.'}")
     return record
 
 
