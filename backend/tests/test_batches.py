@@ -168,7 +168,7 @@ def test_batch_images_wait_behind_interactive_ones(client):
     from app import extraction_service
     from app.priority_gate import PriorityGate
 
-    extraction_service._ollama_gate = PriorityGate(1)
+    extraction_service._model_gate = PriorityGate(1)
     try:
         for n in range(4):
             _upload(client, png((255, 255 - n, 255)), priority="batch")
@@ -178,7 +178,7 @@ def test_batch_images_wait_behind_interactive_ones(client):
             time.sleep(0.05)
         assert client.calls["order"][1] == (255, 200)
     finally:
-        extraction_service._ollama_gate = None
+        extraction_service._model_gate = None
 
 
 def test_more_waiting_reviews_than_database_connections_does_not_deadlock(client, monkeypatch):

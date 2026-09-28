@@ -57,10 +57,10 @@ def _form_data(declared: dict) -> dict:
 
 def submit_case(client: httpx.Client, case: dict, *, retries: int = 2) -> dict:
     """POSTs one case. Retries a bounded number of times on a 502, since that
-    status means the backend's own Ollama call failed transiently (a cold
+    status means the backend's own model call failed transiently (a cold
     model load, a request-queue timeout under load) rather than anything
-    wrong with the case itself — see OllamaUnavailableError in
-    app/inference/ollama_client.py."""
+    wrong with the case itself — see ModelUnavailableError in
+    app/inference/prompt.py."""
 
     front_path = TESTING_DIR / case["front_image"]
     back_path = TESTING_DIR / case["back_image"]

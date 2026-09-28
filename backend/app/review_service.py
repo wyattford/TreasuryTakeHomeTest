@@ -27,7 +27,7 @@ from app.schemas import (
 
 
 class ExtractionFailedError(RuntimeError):
-    """A label image couldn't be read (Ollama down, unusable response)."""
+    """A label image couldn't be read (model unreachable, unusable response)."""
 
 
 def create_application(
@@ -58,7 +58,7 @@ async def run_review(db: Session, application: Application, *, started: float | 
         application_id=application.id,
         extracted_fields=merged.model_dump(),
         field_sources=sources,
-        model_used=settings.ollama_model,
+        model_used=settings.model_name,
         latency_ms=int((time.monotonic() - started) * 1000),
         extraction_ms=max(e.latency_ms or 0 for e in (front, back) if e is not None),
     )

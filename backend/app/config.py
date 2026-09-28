@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +14,10 @@ class Settings(BaseSettings):
     """Runtime configuration, overridable via environment variables or a .env file."""
 
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", env_prefix="", extra="ignore")
+
+    # Which service runs the vision model: "ollama" (self-hosted, below) or
+    # "bedrock" (Amazon Bedrock, further down).
+    inference_provider: Literal["ollama", "bedrock"] = "ollama"
 
     # Ollama server used for label extraction. Points at the Mac during local
     # dev; re-point at the Linux/AMD GPU box later by changing this one value.
@@ -34,6 +39,17 @@ class Settings(BaseSettings):
     # upload doesn't pay the cold-load cost.
     ollama_warmup_on_startup: bool = True
 
+    # Amazon Bedrock, used when inference_provider is "bedrock". The key is a
+    # Bedrock API key (sent as a bearer token). The model id is a cross-region
+    # inference profile, hence the "us." prefix.
+    bedrock_key: str = ""
+    bedrock_region: str = "us-west-2"
+    bedrock_model_id: str = "us.meta.llama4-maverick-17b-instruct-v1:0"
+    bedrock_timeout_seconds: float = 60.0
+    # Calls in flight to Bedrock at once. Bounded by the account's
+    # per-minute quota rather than any hardware, so higher than Ollama's.
+    bedrock_max_concurrency: int = 4
+
     # Uploaded label photos are re-encoded with their long edge capped at this
     # many pixels before extraction: the vision model's cost scales with image
     # size (1300px -> 1024px cut qwen2.5vl's input processing from ~8s to ~4.7s
@@ -47,6 +63,15 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
 
     max_upload_bytes: int = 20 * 1024 * 1024  # 20 MB per file
+
+    @property
+    def model_name(self) -> str:
+        """The model in use, as recorded on each extraction and review."""
+        return self.bedrock_model_id if self.inference_provider == "bedrock" else self.ollama_model
+
+    @property
+    def model_max_concurrency(self) -> int:
+        return self.bedrock_max_concurrency if self.inference_provider == "bedrock" else self.ollama_max_concurrency
 
     @property
     def cors_origin_list(self) -> list[str]:

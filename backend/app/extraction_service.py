@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import SessionLocal
 from app.images import NORMALIZED_CONTENT_TYPE, normalize_label_image
-from app.inference.ollama_client import EXTRACTION_SYSTEM_PROMPT, OllamaUnavailableError, extract_label_fields
+from app.inference import EXTRACTION_SYSTEM_PROMPT, ModelUnavailableError, extract_label_fields
 from app.models import ImageExtraction
 from app.priority_gate import BATCH, INTERACTIVE, PriorityGate
 from app.storage import image_path, save_image
@@ -37,7 +37,7 @@ CANCELLED = "cancelled"
 PRIORITIES = {"interactive": INTERACTIVE, "batch": BATCH}
 
 _tasks: dict[str, asyncio.Task] = {}
-_ollama_gate: PriorityGate | None = None
+_model_gate: PriorityGate | None = None
 
 
 class ExtractionNotFoundError(LookupError):
@@ -46,10 +46,10 @@ class ExtractionNotFoundError(LookupError):
 
 def _gate() -> PriorityGate:
     # Created lazily so it binds to the running event loop.
-    global _ollama_gate
-    if _ollama_gate is None:
-        _ollama_gate = PriorityGate(settings.ollama_max_concurrency)
-    return _ollama_gate
+    global _model_gate
+    if _model_gate is None:
+        _model_gate = PriorityGate(settings.model_max_concurrency)
+    return _model_gate
 
 
 async def start_extraction(db: Session, raw_image: bytes, *, priority: str = "interactive") -> ImageExtraction:
@@ -82,7 +82,7 @@ async def start_extraction(db: Session, raw_image: bytes, *, priority: str = "in
         cache_key=cache_key,
         status=PENDING,
         priority=priority,
-        model_used=settings.ollama_model,
+        model_used=settings.model_name,
     )
     db.add(record)
     db.commit()
@@ -97,8 +97,8 @@ async def wait_for_extraction(
     extraction and returns its current record, finished or not.
 
     ``retry_failed`` re-runs an extraction that previously errored or was
-    cancelled — used when a review actually needs the result, e.g. if Ollama
-    was briefly down when the image was first uploaded.
+    cancelled — used when a review actually needs the result, e.g. if the model
+    was briefly unreachable when the image was first uploaded.
 
     Commits the session's current transaction before waiting, so callers
     must not have changes pending that they don't mean to commit."""
@@ -143,7 +143,7 @@ def cancel_extraction(extraction_id: str) -> None:
 
 def _cache_key(image: bytes) -> str:
     digest = hashlib.sha256(image)
-    digest.update(settings.ollama_model.encode())
+    digest.update(settings.model_name.encode())
     digest.update(EXTRACTION_SYSTEM_PROMPT.encode())
     return digest.hexdigest()
 
@@ -162,7 +162,7 @@ async def _run(extraction_id: str, image: bytes, priority: int) -> None:
         async with _gate().slot(priority):
             fields, latency_ms = await extract_label_fields(image)
         status = DONE
-    except OllamaUnavailableError as exc:
+    except ModelUnavailableError as exc:
         status, error = ERROR, str(exc)
     except asyncio.CancelledError:
         _finish(extraction_id, CANCELLED, None, None, "Cancelled before it finished.")

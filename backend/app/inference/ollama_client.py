@@ -3,10 +3,9 @@
 Deliberately the only place in the codebase that knows Ollama's request/
 response shape — everything else talks to `extract_label_fields`. Swapping
 the inference host (Mac now, the Linux/AMD GPU box later) is a config change
-(`OLLAMA_BASE_URL`), not a code change. Swapping the whole *approach* (e.g.
-falling back to an OCR + small-LLM pipeline per the AI tooling research) means
-adding a sibling module with the same function signature, not touching this
-one or its callers.
+(`OLLAMA_BASE_URL`), not a code change. Other providers are sibling modules
+with the same function signature (bedrock_client.py); app/inference/__init__.py
+picks one from `INFERENCE_PROVIDER`. The prompt they share is in prompt.py.
 
 IMPORTANT — why this does NOT use Ollama's `format` (JSON-schema-constrained /
 grammar-guided decoding) despite that being the mechanism the AI tooling
@@ -29,66 +28,19 @@ once on parse failure) instead.
 from __future__ import annotations
 
 import base64
-import re
 import time
 
 import httpx
 
 from app.config import settings
+from app.inference.prompt import (
+    EXTRACTION_SYSTEM_PROMPT,
+    RETRY_PROMPT,
+    USER_PROMPT,
+    ModelUnavailableError,
+    extract_json_object,
+)
 from app.schemas import ExtractedLabelFields
-
-
-def _describe_fields() -> str:
-    """One line per field, generated from ExtractedLabelFields so the prompt
-    can't drift from the schema the response is validated against. Much
-    shorter than a JSON Schema dump — the model re-reads the whole system
-    prompt for every image, so prompt length is paid on every extraction."""
-
-    lines = []
-    for name, field in ExtractedLabelFields.model_fields.items():
-        if field.annotation == list[str]:
-            kind = "list of strings, may be empty"
-        else:
-            kind = ("number" if "float" in str(field.annotation) else "string") + " or null"
-        lines.append(f'- "{name}" ({kind}): {field.description}')
-    return "\n".join(lines)
-
-
-EXTRACTION_SYSTEM_PROMPT = f"""\
-You are a TTB alcohol beverage label compliance assistant. You are shown one \
-photo of one label from an alcohol beverage container (it may be the front \
-label, a back label, or the only label) and must transcribe what is printed \
-on it into a JSON object.
-
-Transcribe text VERBATIM, including capitalization — this matters for \
-compliance checks. Leave out any field that is not printed on this label — that is normal, \
-since a back label usually carries only some of the fields, and a missing \
-field is NOT illegible. Only list a field in illegible_fields when you can \
-see its text printed on the label but cannot read it with confidence (blur, \
-glare, odd angle, cut off) — never guess such a field's value. Do not infer \
-or invent values that are not visibly printed on this label.
-
-Respond with ONLY a single JSON object — no markdown code fences, no \
-explanation before or after — using these keys:
-{_describe_fields()}"""
-
-_JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
-
-
-class OllamaUnavailableError(RuntimeError):
-    """Raised when Ollama can't be reached or returns an unusable response."""
-
-
-def _image_content(image_bytes: bytes) -> str:
-    return base64.b64encode(image_bytes).decode("ascii")
-
-
-def _extract_json_object(content: str) -> str:
-    """Ollama is instructed to return bare JSON, but models sometimes wrap it
-    in prose or code fences anyway — pull out the outermost {...} block."""
-
-    match = _JSON_OBJECT_RE.search(content)
-    return match.group(0) if match else content
 
 
 async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]:
@@ -100,13 +52,13 @@ async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]
     this product is the matching engine's job, not the model's.
 
     Returns the parsed fields and the elapsed latency in milliseconds.
-    Raises OllamaUnavailableError if the server can't be reached, the model
+    Raises ModelUnavailableError if the server can't be reached, the model
     isn't pulled, or the response still can't be parsed after one retry.
     """
 
     messages = [
         {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
-        {"role": "user", "content": "Transcribe this label.", "images": [_image_content(image)]},
+        {"role": "user", "content": USER_PROMPT, "images": [base64.b64encode(image).decode("ascii")]},
     ]
 
     started = time.monotonic()
@@ -115,18 +67,17 @@ async def extract_label_fields(image: bytes) -> tuple[ExtractedLabelFields, int]
         for _attempt in range(2):  # one retry if the response doesn't parse
             content = await _chat(client, messages)
             try:
-                fields = ExtractedLabelFields.model_validate_json(_extract_json_object(content))
+                fields = ExtractedLabelFields.model_validate_json(extract_json_object(content))
                 latency_ms = int((time.monotonic() - started) * 1000)
                 return fields, latency_ms
             except ValueError as exc:
                 last_error = exc
-                retry_prompt = "That wasn't valid JSON matching the schema. Respond with ONLY the corrected JSON object."
                 messages = messages + [
                     {"role": "assistant", "content": content},
-                    {"role": "user", "content": retry_prompt},
+                    {"role": "user", "content": RETRY_PROMPT},
                 ]
 
-    raise OllamaUnavailableError(f"Ollama response did not match the expected schema after a retry: {last_error}")
+    raise ModelUnavailableError(f"Ollama response did not match the expected schema after a retry: {last_error}")
 
 
 async def _chat(client: httpx.AsyncClient, messages: list[dict]) -> str:
@@ -144,14 +95,14 @@ async def _chat(client: httpx.AsyncClient, messages: list[dict]) -> str:
         # Ollama returns 404 with a JSON {"error": "..."} body for problems
         # like an unpulled model — surface that reason, not just the status.
         reason = exc.response.json().get("error", exc.response.text) if exc.response.content else str(exc)
-        raise OllamaUnavailableError(f"Ollama at {settings.ollama_base_url} rejected the request: {reason}") from exc
+        raise ModelUnavailableError(f"Ollama at {settings.ollama_base_url} rejected the request: {reason}") from exc
     except httpx.HTTPError as exc:
-        raise OllamaUnavailableError(f"Could not reach Ollama at {settings.ollama_base_url}: {exc}") from exc
+        raise ModelUnavailableError(f"Could not reach Ollama at {settings.ollama_base_url}: {exc}") from exc
 
     body = response.json()
     content = body.get("message", {}).get("content")
     if not content:
-        raise OllamaUnavailableError(f"Ollama returned no content: {body}")
+        raise ModelUnavailableError(f"Ollama returned no content: {body}")
     return content
 
 

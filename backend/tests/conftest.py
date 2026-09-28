@@ -16,7 +16,7 @@ from PIL import Image  # noqa: E402
 
 from app import extraction_service, storage  # noqa: E402
 from app.db import Base, engine  # noqa: E402
-from app.inference.ollama_client import OllamaUnavailableError  # noqa: E402
+from app.inference import ModelUnavailableError  # noqa: E402
 from app.main import app  # noqa: E402
 from app.schemas import ExtractedLabelFields  # noqa: E402
 
@@ -66,7 +66,7 @@ def client(tmp_path, monkeypatch):
         red, green, _ = Image.open(io.BytesIO(image)).convert("RGB").getpixel((0, 0))
         calls["order"].append((red, green))
         if calls["fail"] or (red > 200 and green < 50):
-            raise OllamaUnavailableError("Ollama is down")
+            raise ModelUnavailableError("Ollama is down")
         return (FRONT_FIELDS if red > 128 else BACK_FIELDS), 50
 
     monkeypatch.setattr(extraction_service, "extract_label_fields", fake_extract)

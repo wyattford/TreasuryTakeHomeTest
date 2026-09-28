@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.batch_service import resume_batches
 from app.config import settings
 from app.db import init_db
-from app.inference.ollama_client import warm_up
+from app.inference import warm_up
 from app.routers import applications, batches, extractions, reviews
 
 

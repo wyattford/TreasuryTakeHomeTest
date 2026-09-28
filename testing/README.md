@@ -5,7 +5,7 @@ images with **known ground-truth content**, paired with declared application
 data that either matches that content exactly or deliberately diverges from
 it in a specific, targeted way. Because we control both sides, we know the
 correct verdict for every field ahead of time — any difference between that
-and what the real pipeline (Qwen2.5-VL via Ollama + the matching engine)
+and what the real pipeline (the vision model + the matching engine)
 actually returns is a genuine finding, not a guess.
 
 This is different from `backend/tests/test_matching_engine.py`, which unit
@@ -38,7 +38,7 @@ results update automatically instead of drifting out of sync.
 
 ## Running it
 
-Backend and Ollama (with `qwen2.5vl` pulled) need to be running first:
+The backend needs to be running, with its model reachable: Ollama with `qwen2.5vl` pulled, or `INFERENCE_PROVIDER=bedrock` and a `BEDROCK_KEY` in `backend/.env` (see the main README):
 
 ```bash
 cd backend && uv run uvicorn app.main:app --reload   # separate terminal
@@ -151,3 +151,7 @@ Result: **43/43**. Findings 2 and 3 didn't reproduce in this mode. Each image's 
 On an M4 Pro, with images capped at 1024 px on the long edge and Ollama running one request at a time, the uncached gauntlet cases took a **median 12.1 s** (range 4–16 s) to read both images. The gauntlet submits the images *with* the review, so this is the worst case, with no head start. In the UI, each image starts being read the moment it's picked, typically ~6–9 s per image, so the wait after pressing Review is whatever reading time is left once the agent has filled in the form. Downscaling from 1300 to 1024 px cut per-image input processing from ~8.0 s to ~4.7 s.
 
 Cases that reuse an already-read label image with different declared values finish in ~30 ms: extraction results are reused by content hash, so only the matching step runs.
+
+## Llama 4 Maverick on Amazon Bedrock
+
+Run unchanged against `us.meta.llama4-maverick-17b-instruct-v1:0` (same prompt, same parsing): **42/43**, about 1.5 s per image (1.0–4.7 s). The one failure, `chianti_clean_correct`, is a field swap: the label prints the class/type "Chianti Classico" and, below it, the appellation "Chianti Classico DOCG", and the model put each in the other's field. The review comes out flagged rather than clear, so the agent is asked to look at a label that was fine. It was left unfixed on purpose: the prompt was tuned on these 43 labels, and tuning it again to pass this one would make the score less meaningful, not the model better.
